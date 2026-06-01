@@ -1,11 +1,17 @@
 package com.reachvision
 
+import android.os.Bundle // 1. ADD THIS IMPORT
 import com.facebook.react.ReactActivity
 import com.facebook.react.ReactActivityDelegate
 import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint.fabricEnabled
 import com.facebook.react.defaults.DefaultReactActivityDelegate
 
 class MainActivity : ReactActivity() {
+
+  // 2. ADD THIS ENTIRE ONCREATE BLOCK
+  override fun onCreate(savedInstanceState: Bundle?) {
+    super.onCreate(null) // This MUST be null
+  }
 
   /**
    * Returns the name of the main component registered from JavaScript. This is used to schedule
