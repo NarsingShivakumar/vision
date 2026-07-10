@@ -79,7 +79,7 @@ class VrCalibrationService {
     constructor() {
         // Default profile — exact from calibration.service.ts
         this._profile = {
-            ppi: 500,
+            ppi: 403,
             physicalDistanceMm: 350,
             lensMagnification: 1.0,
             ipdMm: 63,
@@ -137,8 +137,9 @@ class VrCalibrationService {
         // Angular: const diagIn = diagPx / (80 * dpr)
         const diagIn = diagPx / (40 * dpr);
         const estimated = diagPx / diagIn;
+        console.log("estimated ppi::", estimated);
 
-        const ppi = (estimated > 100 && estimated < 800) ? Math.round(estimated) : 326;
+        const ppi = (estimated > 60 && estimated < 800) ? Math.round(estimated) : 326;
         this._profile.ppi = ppi;
         console.log(`[Calibration] Auto-detected PPI: ${ppi} (dpr=${dpr}, diagPx=${diagPx.toFixed(0)})`);
         return ppi;
@@ -215,6 +216,7 @@ class VrCalibrationService {
         // In VR landscape: innerHeight ≈ screenH (short axis), innerWidth ≈ screenW (full)
         const discPx = Math.min(screenH * 0.80, screenW * 0.45);
         const maxPx = discPx * 0.90;
+        console.log("raw size::", raw, "maxPx size:: ", maxPx);
 
         return Math.min(raw, maxPx);
     }
