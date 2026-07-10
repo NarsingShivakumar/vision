@@ -71,6 +71,7 @@ function EyePanel({
   isLensCheck,
   lensCheckEye,
   contentTranslateX = 0,
+  fixedPreviewSize,
 }) {
   // ── Feedback flash animation (Angular transition: opacity .1s) ────────────
   const feedbackOpacity = useRef(new Animated.Value(0)).current;
@@ -115,6 +116,7 @@ function EyePanel({
             panelWidth={PW}
             panelHeight={PH}
             parallax={parallax}
+            fixedPreviewSize={fixedPreviewSize}
           />
         );
 
@@ -124,6 +126,7 @@ function EyePanel({
             panelWidth={PW}
             panelHeight={PH}
             parallax={parallax}
+            fixedPreviewSize={fixedPreviewSize}
           />
         );
 
@@ -136,6 +139,7 @@ function EyePanel({
             panelWidth={PW}
             panelHeight={PH}
             parallax={parallax}
+            fixedPreviewSize={fixedPreviewSize}
           />
         );
 
@@ -313,7 +317,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#000000',
     zIndex: 5,
   },
-    contentWrapper: {
+  contentWrapper: {
     alignItems: 'center',
     justifyContent: 'center',
   },

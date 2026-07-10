@@ -86,10 +86,10 @@ class VisionService {
     return res.json();
   }
 
-  async getServerInfo() {
-    const res = await fetch(`${backendURL}/api/vr/server-info`);
-    return res.json();
-  }
+  // async getServerInfo() {
+  //   const res = await fetch(`${backendURL}/api/vr/server-info`);
+  //   return res.json();
+  // }
 
   createSession(roomCode, patientName) {
     this.roomCode = roomCode;

@@ -173,19 +173,19 @@ function ClockDial({ svgSize }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-function AstigmatismTest({ panelWidth, panelHeight, parallax }) {
+function AstigmatismTest({ panelWidth, panelHeight, parallax, fixedPreviewSize }) {
   const PW = panelWidth ?? 400;
   const PH = panelHeight ?? 300;
 
   // Angular: .clock-svg { width: 160px; height: 160px }
   // Scale proportionally for the panel — keep 160px as reference, scale if smaller
-  const svgSize = Math.min(160, Math.round(Math.min(PW, PH) * 0.52));
-
+  const svgSize = fixedPreviewSize
+    ? fixedPreviewSize * 0.75
+    : Math.min(160, Math.round(Math.min(PW, PH) * 0.52));
   return (
     <View style={[styles.panel, { width: PW, height: PH }]}>
 
-      <BarrelVignette panelWidth={PW} panelHeight={PH} />
-
+      {!fixedPreviewSize && <BarrelVignette panelWidth={PW} panelHeight={PH} />}
       <ClockDial svgSize={svgSize} />
 
       {/* .phase-hint.ar-hint — "Which lines look darkest?" */}

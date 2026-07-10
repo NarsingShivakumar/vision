@@ -98,9 +98,11 @@ class WebRTCService {
     this._listenForSignaling();
 
     if (role === 'assistant') {
+      console.log('[WebRTC Emit] vr_webrtc_ping_patient', JSON.stringify({ roomCode: this.roomCode }));
       socketService.emit('vr_webrtc_ping_patient', { roomCode: this.roomCode });
       console.log('[WebRTC] Assistant ready — pinging patient');
     } else {
+      console.log('[WebRTC Emit] vr_webrtc_patient_ready', JSON.stringify({ roomCode: this.roomCode }));
       socketService.emit('vr_webrtc_patient_ready', { roomCode: this.roomCode });
       console.log('[WebRTC] Patient ready signal sent');
     }
@@ -144,23 +146,22 @@ class WebRTCService {
     );
 
     this.pc.ontrack = (event) => {
-      console.log('[WebRTC] Remote track received');
+      console.log('[WebRTC State] ontrack — remote track received');
       this.remoteStream = event.streams[0];
       this._notifyState();
     };
 
     this.pc.onicecandidate = (e) => {
       if (e.candidate) {
-        socketService.emit('vr_webrtc_ice', {
-          roomCode: this.roomCode,
-          candidate: e.candidate.toJSON(),
-        });
+        const payload = { roomCode: this.roomCode, candidate: e.candidate.toJSON() };
+        console.log('[WebRTC Emit] vr_webrtc_ice', JSON.stringify(payload));
+        socketService.emit('vr_webrtc_ice', payload);
       }
     };
 
     this.pc.onconnectionstatechange = () => {
       const s = this.pc?.connectionState;
-      console.log('[WebRTC] Connection state:', s);
+      console.log('[WebRTC State] connectionState →', s);
       this.isConnected = s === 'connected';
 
       if (s === 'connected' || s === 'failed' || s === 'disconnected') {
@@ -174,13 +175,14 @@ class WebRTCService {
     };
 
     this.pc.onicegatheringstatechange = () => {
-      console.log('[WebRTC] ICE gathering state:', this.pc?.iceGatheringState);
+      console.log('[WebRTC State] iceGatheringState →', this.pc?.iceGatheringState);
     };
   }
 
   _listenForSignaling() {
     // Assistant receives this after pinging the patient
     const onPatientReady = async () => {
+      console.log('[WebRTC Event] webrtc_patient_ready (received)');
       if (this.role !== 'assistant') return;
       console.log('[WebRTC] Patient is ready — sending offer');
       await this._createAndSendOffer();
@@ -188,6 +190,7 @@ class WebRTCService {
     this._socketUnsubs.push(socketService.on('webrtc_patient_ready', onPatientReady));
 
     const onOffer = async (sdp) => {
+      console.log('[WebRTC Event] vr_offer (received)', sdp ? JSON.stringify(sdp) : 'No payload');
       if (this.role !== 'patient' || !this.pc) return;
       console.log('[WebRTC] Received offer');
       try {
@@ -196,6 +199,7 @@ class WebRTCService {
         await this._flushPendingCandidates();
         const answer = await this.pc.createAnswer();
         await this.pc.setLocalDescription(answer);
+        console.log('[WebRTC Emit] vr_webrtc_answer', JSON.stringify({ roomCode: this.roomCode, sdp: answer }));
         socketService.emit('vr_webrtc_answer', { roomCode: this.roomCode, sdp: answer });
         console.log('[WebRTC] Answer sent');
       } catch (err) {
@@ -205,6 +209,7 @@ class WebRTCService {
     this._socketUnsubs.push(socketService.on('vr_offer', onOffer));
 
     const onAnswer = async (sdp) => {
+      console.log('[WebRTC Event] vr_answer (received)', sdp ? JSON.stringify(sdp) : 'No payload');
       if (this.role !== 'assistant' || !this.pc) return;
       console.log('[WebRTC] Received answer');
       try {
@@ -218,6 +223,7 @@ class WebRTCService {
     this._socketUnsubs.push(socketService.on('vr_answer', onAnswer));
 
     const onCandidate = async (data) => {
+      console.log('[WebRTC Event] vr_candidate (received)', data ? JSON.stringify(data) : 'No payload');
       if (!this.pc || !data?.candidate) return;
       if (!this.remoteDescSet) {
         console.log('[WebRTC] Buffering ICE candidate (remote desc not set yet)');
@@ -256,7 +262,9 @@ class WebRTCService {
     try {
       const offer = await this.pc.createOffer({ offerToReceiveAudio: true });
       await this.pc.setLocalDescription(offer);
-      socketService.emit('vr_webrtc_offer', { roomCode: this.roomCode, sdp: offer });
+      const payload = { roomCode: this.roomCode, sdp: offer };
+      console.log('[WebRTC Emit] vr_webrtc_offer', JSON.stringify(payload));
+      socketService.emit('vr_webrtc_offer', payload);
       console.log('[WebRTC] Offer sent');
     } catch (err) {
       console.error('[WebRTC] offer error', err);

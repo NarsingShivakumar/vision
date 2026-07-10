@@ -35,7 +35,7 @@ export function useVisionService(socket) {
   const cw   = useRef({ right:0, left:0, both:0 });
 
   const generateRoom  = useCallback(async () => (await fetch(`${API}/session/new`)).json(), []);
-  const getServerInfo = useCallback(async () => (await fetch(`${API}/server-info`)).json(), []);
+  // const getServerInfo = useCallback(async () => (await fetch(`${API}/server-info`)).json(), []);
   const getAllResults  = useCallback(async () => (await fetch(`${API}/results`)).json(), []);
   const deleteResult  = useCallback(id => fetch(`${API}/results/${id}`, { method:'DELETE' }), []);
   const saveResult    = useCallback(r => fetch(`${API}/results`, {
@@ -69,7 +69,7 @@ export function useVisionService(socket) {
   const getCurrentAcuity = useCallback(eye => ACUITY_LEVELS[idx.current[eye]], []);
 
   return { roomCode, phase, currentOptotype,
-           generateRoom, getServerInfo, saveResult, getAllResults, deleteResult,
+           generateRoom, saveResult, getAllResults, deleteResult,
            createSession, showInstruction, setPhase, showOptotype,
            recordResponse, resetAcuity, getCurrentAcuity, endTest };
 }

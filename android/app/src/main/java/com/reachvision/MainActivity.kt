@@ -1,6 +1,7 @@
 package com.reachvision
 
 import android.os.Bundle // 1. ADD THIS IMPORT
+import android.view.WindowManager
 import com.facebook.react.ReactActivity
 import com.facebook.react.ReactActivityDelegate
 import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint.fabricEnabled
@@ -11,6 +12,7 @@ class MainActivity : ReactActivity() {
   // 2. ADD THIS ENTIRE ONCREATE BLOCK
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(null) // This MUST be null
+    window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
   }
 
   /**

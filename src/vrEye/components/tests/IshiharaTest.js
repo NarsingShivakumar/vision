@@ -118,7 +118,7 @@ function IshiharaPlate({ dots, size, plateNum, totalPlates }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-function IshiharaTest({ dots, plateIndex, totalPlates, panelWidth, panelHeight, parallax }) {
+function IshiharaTest({ dots, plateIndex, totalPlates, panelWidth, panelHeight, parallax, fixedPreviewSize }) {
   const PW = panelWidth ?? 400;
   const PH = panelHeight ?? 300;
 
@@ -134,8 +134,7 @@ function IshiharaTest({ dots, plateIndex, totalPlates, panelWidth, panelHeight, 
   return (
     <View style={[styles.panel, { width: PW, height: PH }]}>
 
-      <BarrelVignette panelWidth={PW} panelHeight={PH} />
-
+      {!fixedPreviewSize && <BarrelVignette panelWidth={PW} panelHeight={PH} />}
       <View style={[styles.wrapper, { width: plateSize }]}>
 
         {/* .plate-badge — "Plate N/12" */}

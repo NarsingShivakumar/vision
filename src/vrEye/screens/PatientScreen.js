@@ -1,31 +1,38 @@
 /**
- * PatientScreen.js v8.4 — Fix result_ready PDF URI construction
+ * PatientScreen.js v8.5 — Validation hardening on registration form
  *
- * Changes from v8.3:
- * - FIX: result_ready now reads `data.resultId` and builds the PDF URI from
- *        apiService.defaults.baseURL + '/api/vr/results/:id/pdf', matching
- *        the Angular downloadReport() pattern exactly.
- *        Previous code tried data?.pdfUrl / data?.pdfUri which the server
- *        never sends — so resultPdfUri was always empty string.
+ * Changes from v8.4:
+ * - FIX: Name field: minLength 2, required, trims before validation
+ * - FIX: Mobile: required, exactly 10 digits enforced via pattern AND
+ *        a custom `validate` that checks length < 10 with a distinct message,
+ *        maxLength={10} kept on TextInput so keyboard never allows >10
+ * - FIX: Age: range 1–120, numeric-only pattern, NOT required (still optional)
+ *        but if filled must be valid — empty string bypasses min/max/pattern
+ *        correctly via conditional validate
+ * - FIX: Gender: required, already had rule — no change needed
+ * - FIX: "Next — Choose Assistant" button: disabled unless react-hook-form
+ *        `isValid` is true.  Changed form `mode` to 'all' so validation runs
+ *        on both onChange AND onBlur, which means the button stays disabled
+ *        until every required field has been touched and is valid.
+ *        Previously 'onChange' mode left isValid=false on first render because
+ *        required fields hadn't been touched yet — the button appeared disabled
+ *        correctly but errors only showed after the user typed, not on blur.
+ *        With 'all', errors show on blur AND the button state is reliable.
  *
- * Changes from v8.2 (kept):
- * - ADD: `assistantDisconnected` state — drives SplitVRLayout overlay
- * - ADD: `isCompleteRef` — stable ref so socket callbacks read live `isComplete`
- * - ADD: socket listener `assistant_disconnected` →
- *        • sets `assistantDisconnected` = true
- *        • broadcasts { assistantDisconnected: true } to controller via localPeerService
- *          so controller shows reconnect modal
- * - ADD: socket listener `assistant_joined` →
- *        • clears `assistantDisconnected` = false
- *        • broadcasts { assistantDisconnected: false } → controller closes modal
- *        • restarts WebRTC audio for the new assistant
- * - ADD: socket listener `result_ready` →
- *        • broadcasts { resultReady: true, resultPdfUri } to controller
- *          so controller shows the PDF result viewer
- * - ADD: `assistantDisconnected` prop passed to SplitVRLayout
- * - ADD: `VR_EVENTS` in socketService now includes 'assistant_disconnected',
- *        'assistant_joined', 'result_ready' (see socketService.js)
- * - FIX: returnToRegistration now resets assistantDisconnected state
+ * All other logic identical to v8.4.
+ */
+
+/**
+ * PatientScreen.js v8.6 — auth_sync from Controller
+ *
+ * Changes from v8.5:
+ * - ADD: listener for 'auth_sync' event from controller (HOST only)
+ *        Receives { kioskId, loginInfo, token } and persists them to AsyncStorage
+ *        using the same keys as KioskSetupScreen + Login.js so that the host
+ *        device is authenticated after the controller completes login.
+ *        Stores: isFirstTimeLaunch, kioskId, loginResponseEntityToken,
+ *                loginInfo, isLoggedIn, doctorId
+ * - All other logic identical to v8.5.
  */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
@@ -35,14 +42,16 @@ import {
   KeyboardAvoidingView, Platform, Dimensions, ActivityIndicator,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import { useForm, Controller } from 'react-hook-form';
 
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import socketService from '../services/socketService';
 import webRTCService from '../services/webRTCService';
 import calibrationService from '../services/calibrationService';
 import localPeerService, { PEER_ROLE } from '../services/localPeerService';
 import WifiGuard from '../components/WifiGuard';
 import { useWifiGuard } from '../hooks/useWifiGuard';
-import { generatePlateDots, getPlate, TOTAL_PLATES } from '../utils/ishiharaPanel';
+import { generatePlateDots, getPlate, TOTAL_PLATES, preloadIshiharaPlates } from '../utils/ishiharaPanel';
 import SplitVRLayout from '../components/SplitVRLayout';
 import { useTTS } from '../hooks/useTTS';
 import apiService from '../../api/AxiosClient';
@@ -78,12 +87,6 @@ export default function PatientScreen({ route, navigation }) {
 
   const [view, setView] = useState(isVRHost ? 'host_waiting' : 'registration');
   const [regStep, setRegStep] = useState('details');
-  const [regName, setRegName] = useState('');
-  const [regAge, setRegAge] = useState('');
-  const [regGender, setRegGender] = useState('');
-  const [regMobile, setRegMobile] = useState('');
-  const [regGlasses, setRegGlasses] = useState(false);
-  const [regAllergies, setRegAllergies] = useState({ ...INITIAL_ALLERGIES });
   const [activeAssistants, setActiveAssistants] = useState([]);
   const [selectedAssistantId, setSelectedAssistantId] = useState('');
   const [loadingAssistants, setLoadingAssistants] = useState(false);
@@ -117,21 +120,42 @@ export default function PatientScreen({ route, navigation }) {
   });
   const [parallax, setParallax] = useState(null);
   const [peerConnected, setPeerConnected] = useState(localPeerService.isConnected());
-
-  // ── v8.3 NEW state ────────────────────────────────────────────────────────
   const [assistantDisconnected, setAssistantDisconnected] = useState(false);
+
+  // ── React Hook Form Setup ─────────────────────────────────────────────────
+  // mode: 'all' = validate on both onChange and onBlur
+  // This ensures:
+  //   • Error messages appear as soon as the user leaves a field (blur)
+  //   • The Next button stays disabled until EVERY required field is valid
+  //   • Inline errors update instantly while the user is still typing (onChange)
+  const {
+    control,
+    handleSubmit,
+    getValues,
+    setValue,
+    watch,
+    reset,
+    formState: { errors, isValid }
+  } = useForm({
+    mode: 'all',           // ← changed from 'onChange' to 'all'
+    defaultValues: {
+      regName: '',
+      regAge: '',
+      regMobile: '',
+      regGender: '',
+      regGlasses: false,
+      regAllergies: { ...INITIAL_ALLERGIES },
+    }
+  });
 
   const feedbackTimer = useRef(null);
   const socketUnsubs = useRef([]);
   const peerUnsubs = useRef([]);
   const previousBrightness = useRef(null);
-  const autoStartedRef = useRef(false);
-
-  // Stable refs so callbacks never capture stale values
   const roomCodeRef = useRef('');
   const viewRef = useRef(isVRHost ? 'host_waiting' : 'registration');
   const enterVRRef = useRef(null);
-  const isCompleteRef = useRef(false); // v8.3 — lets socket callbacks skip if test done
+  const isCompleteRef = useRef(false);
 
   const setViewSynced = useCallback((v) => {
     viewRef.current = v;
@@ -192,6 +216,7 @@ export default function PatientScreen({ route, navigation }) {
   // ── Mount ─────────────────────────────────────────────────────────────────
   useEffect(() => {
     calibrationService.autoDetectPpi();
+    preloadIshiharaPlates();
     loadPlate(0);
 
     if (isVRHost) {
@@ -215,7 +240,7 @@ export default function PatientScreen({ route, navigation }) {
       clearTimeout(feedbackTimer.current);
       disableTestFullscreen();
     };
-  }, []); // eslint-disable-line
+  }, []);
 
   useEffect(() => {
     if (view === 'vr') enableTestFullscreen();
@@ -267,31 +292,39 @@ export default function PatientScreen({ route, navigation }) {
     finally { setLoadingAssistants(false); }
   }, []);
 
-  const regDetailsValid = regName.trim() && regMobile.trim() && regGender;
-
-  const goToAssistantStep = useCallback(() => {
-    if (regDetailsValid) { setRegStep('assistant'); fetchAssistants(); }
-  }, [regDetailsValid, fetchAssistants]);
+  // Fired by handleSubmit when Step 1 is valid
+  const onDetailsSubmit = () => {
+    setRegStep('assistant');
+    fetchAssistants();
+  };
 
   const submitRegistration = useCallback(async () => {
     if (!selectedAssistantId || submitting) return;
     setSubmitting(true); setSubmitError('');
+
+    const formData = getValues();
+
     const payload = {
-      patientName: regName.trim(), patientAge: regAge ? Number(regAge) : null,
-      patientGender: regGender, mobileNumber: regMobile.trim(),
-      wearingGlasses: regGlasses, assistantId: selectedAssistantId, ...regAllergies,
+      patientName: formData.regName.trim(),
+      patientAge: formData.regAge ? Number(formData.regAge) : null,
+      patientGender: formData.regGender,
+      mobileNumber: formData.regMobile.trim(),
+      wearingGlasses: formData.regGlasses,
+      assistantId: selectedAssistantId,
+      ...formData.regAllergies,
     };
+
     try {
       const res = await submitRegistrationApi(payload);
       const rc = res.roomCode;
       roomCodeRef.current = rc;
       setRoomCode(rc);
-      setPatientName(res.patientName ?? regName.trim());
+      setPatientName(res.patientName ?? formData.regName.trim());
       setViewSynced('ready');
     } catch (err) {
       setSubmitError(err?.response?.data?.message ?? err?.message ?? 'Could not start session. Please try again.');
     } finally { setSubmitting(false); }
-  }, [selectedAssistantId, submitting, regName, regAge, regGender, regMobile, regGlasses, regAllergies, setViewSynced]);
+  }, [selectedAssistantId, submitting, getValues, setViewSynced]);
 
   const returnToRegistration = useCallback((msg = '') => {
     clearTimeout(feedbackTimer.current);
@@ -310,7 +343,7 @@ export default function PatientScreen({ route, navigation }) {
     roomCodeRef.current = '';
     setRoomCode('');
     setIsComplete(false);
-    isCompleteRef.current = false; // v8.3 reset
+    isCompleteRef.current = false;
     setPhase('waiting');
     setInstruction('Waiting for the assistant to start the test\u2026');
     setPatientName(''); setOptotype(null); setNearOptotype(null);
@@ -322,17 +355,28 @@ export default function PatientScreen({ route, navigation }) {
     setParallax(null);
     setRtcState({ isMuted: false, isConnected: false, isInitialising: false, hasError: false, errorMessage: '' });
     setIsLensCheck(false); setLensCheckEye('both');
-    setAssistantDisconnected(false); // v8.3 reset
+    setAssistantDisconnected(false);
     loadPlate(0);
+    reset();
 
     if (isVRHost) broadcastVRState({
       phase: 'waiting', isComplete: false,
       instruction: 'Waiting\u2026',
-      assistantDisconnected: false, // v8.3 reset controller overlay too
+      assistantDisconnected: false,
     });
-  }, [disableTestFullscreen, loadPlate, isVRHost, broadcastVRState]);
+  }, [disableTestFullscreen, loadPlate, isVRHost, broadcastVRState, reset]);
 
   const handleCloseSession = useCallback(() => returnToRegistration(''), [returnToRegistration]);
+
+  const handleSelfDisconnect = useCallback(() => {
+    localPeerService.send('peer_self_disconnect', {});
+    setTimeout(() => {
+      socketService.disconnect();
+      webRTCService.disconnect();
+      localPeerService.destroy();
+      navigation.replace('RoleAndConnectScreen');
+    }, 150);
+  }, [navigation]);
 
   // ── Enter VR ──────────────────────────────────────────────────────────────
   const enterVR = useCallback(() => {
@@ -341,17 +385,15 @@ export default function PatientScreen({ route, navigation }) {
       console.warn('[PatientScreen] enterVR called but roomCodeRef is empty');
       return;
     }
-    console.log('[PatientScreen] enterVR → code:', code);
     speak('Connecting to session. Please wait.');
     viewRef.current = 'vr';
     setView('vr');
     socketService.connect('patient');
     attachSocketListeners(code);
     socketService.onConnected(() => {
-      console.log('[PatientScreen] socket connected, emitting vr_join_session', code);
       socketService.emit('vr_join_session', { roomCode: code });
     });
-  }, [speak]); // eslint-disable-line
+  }, [speak]);
 
   enterVRRef.current = enterVR;
 
@@ -390,6 +432,33 @@ export default function PatientScreen({ route, navigation }) {
 
     P.push(localPeerService.on('end_session', () => {
       returnToRegistration('Session ended by controller.');
+    }));
+
+    P.push(localPeerService.on('peer_self_disconnect', () => {
+      socketService.disconnect();
+      webRTCService.disconnect();
+      localPeerService.destroy();
+      navigation.replace('RoleAndConnectScreen');
+    }));
+
+    // ── NEW: auth_sync — controller sends credentials after login ─────────────
+    // Persists the same AsyncStorage keys that KioskSetupScreen + Login.js write
+    // so the HOST device is fully authenticated without requiring its own login.
+    P.push(localPeerService.on('auth_sync', async (data) => {
+      try {
+        const { kioskId = '', loginInfo = '', token = '' } = data;
+        console.log('[PatientScreen] auth_sync received — storing credentials for kioskId:', kioskId);
+        // Sequential setItem — same pattern as Login.js (avoids multiSet bridgeless issues)
+        await AsyncStorage.setItem('isFirstTimeLaunch', 'true');
+        await AsyncStorage.setItem('kioskId', String(kioskId));
+        await AsyncStorage.setItem('loginResponseEntityToken', String(token));
+        await AsyncStorage.setItem('loginInfo', String(loginInfo));
+        await AsyncStorage.setItem('isLoggedIn', '1');
+        await AsyncStorage.setItem('doctorId', '');
+        console.log('[PatientScreen] auth_sync — credentials stored successfully');
+      } catch (e) {
+        console.error('[PatientScreen] auth_sync — failed to store credentials:', e);
+      }
     }));
   }
 
@@ -556,7 +625,6 @@ export default function PatientScreen({ route, navigation }) {
       broadcastVRState({ isComplete: true, phase: 'complete' });
     }));
 
-    // ── LEGACY peer_disconnected (treated as assistant_disconnected) ──────
     U.push(socketService.on('peer_disconnected', () => {
       if (isCompleteRef.current) return;
       console.log('[PatientScreen] peer_disconnected → showing disconnect overlay');
@@ -565,28 +633,21 @@ export default function PatientScreen({ route, navigation }) {
       broadcastVRState({ assistantDisconnected: true });
     }));
 
-    // ── v8.3 NEW: assistant_disconnected ─────────────────────────────────
-    // Server fires this when the assistant's socket disconnects mid-session.
     U.push(socketService.on('assistant_disconnected', (data) => {
-      if (isCompleteRef.current) return; // test already done, ignore
+      if (isCompleteRef.current) return;
       console.log('[PatientScreen] assistant_disconnected', data);
       setAssistantDisconnected(true);
       setInstruction('Assistant disconnected. Please wait\u2026');
       speak('The assistant has disconnected. Please wait for them to reconnect.');
-      // Broadcast to controller → triggers reconnect modal
       broadcastVRState({ assistantDisconnected: true });
     }));
 
-    // ── v8.3 NEW: assistant_joined ────────────────────────────────────────
-    // Server fires this when the same or a reassigned assistant joins the room.
     U.push(socketService.on('assistant_joined', async (data) => {
       console.log('[PatientScreen] assistant_joined', data);
       setAssistantDisconnected(false);
       setInstruction('Assistant reconnected. Resuming test\u2026');
       speak('Assistant reconnected. The test will continue.');
-      // Broadcast to controller → closes reconnect modal, continues monitoring
       broadcastVRState({ assistantDisconnected: false });
-      // Restart WebRTC so new assistant can hear the patient
       try {
         webRTCService.disconnect();
         await webRTCService.initAudio('patient', roomCodeRef.current);
@@ -595,22 +656,31 @@ export default function PatientScreen({ route, navigation }) {
       }
     }));
 
-    // ── v8.4 result_ready ────────────────────────────────────────────────
-    // Server fires { resultId } — same payload as Angular's result_ready handler.
-    // URI is constructed the same way Angular's downloadReport() does:
-    //   GET <baseURL>/api/vr/results/<resultId>/pdf
-    // Broadcast to controller which opens it in react-native-pdf.
     U.push(socketService.on('result_ready', (data) => {
+      setIsComplete(true);
       console.log('[PatientScreen] result_ready', data);
       const resultId = data?.resultId ?? '';
       if (!resultId) {
         console.warn('[PatientScreen] result_ready — resultId empty, payload:', data);
         return;
       }
-      // Build full URL from Axios baseURL — mirrors Angular environment.API_ENDPOINT
-      const resultPdfUri = getResultPdfUri(resultId); 
+      const resultPdfUri = getResultPdfUri(resultId);
       console.log('[PatientScreen] broadcasting resultPdfUri:', resultPdfUri);
       broadcastVRState({ resultReady: true, resultPdfUri, resultId });
+    }));
+    U.push(socketService.on('call_declined', (data) => {
+      console.log('[PatientScreen] call_declined', data);
+      const msg = data?.message ?? 'The assistant declined the call.';
+      speak(msg);
+      if (isVRHost) {
+        localPeerService.send('call_declined', {
+          roomCode: data?.roomCode ?? roomCodeRef.current,
+          patientName: data?.patientName ?? patientName,
+          message: msg,
+        });
+      }
+
+      returnToRegistration(msg);
     }));
   }
 
@@ -632,6 +702,13 @@ export default function PatientScreen({ route, navigation }) {
                 : 'Make sure the controller device connects on the same Wi\u2011Fi.'}
             </Text>
             {peerConnected && <ActivityIndicator color="#5b5bd6" />}
+            <TouchableOpacity
+              style={s.hostDisconnectBtn}
+              onPress={handleSelfDisconnect}
+              activeOpacity={0.85}
+            >
+              <Text style={s.hostDisconnectText}>⏏ Disconnect &amp; Exit</Text>
+            </TouchableOpacity>
           </View>
         </SafeAreaView>
       </SafeAreaProvider>
@@ -673,45 +750,208 @@ export default function PatientScreen({ route, navigation }) {
                 <View style={s.regBody}>
                   {regStep === 'details' && (
                     <>
+                      {/* ── Name Field ───────────────────────────────────────────────────────
+                          Rules:
+                            • required — cannot be empty
+                            • minLength 2 — must have at least 2 characters
+                            • validate: trim check — prevents "  " (spaces-only) passing
+                      */}
                       <View style={s.regField}>
                         <Text style={s.regLabel}>Full Name <Text style={s.req}>*</Text></Text>
-                        <TextInput style={s.regInput} value={regName} onChangeText={setRegName} placeholder="Patient name" placeholderTextColor="#333" />
+                        <Controller
+                          control={control}
+                          name="regName"
+                          rules={{
+                            required: 'Patient name is required',
+                            minLength: {
+                              value: 2,
+                              message: 'Name must be at least 2 characters',
+                            },
+                            validate: (v) =>
+                              v.trim().length >= 2 || 'Name must be at least 2 characters',
+                          }}
+                          render={({ field: { onChange, onBlur, value } }) => (
+                            <TextInput
+                              style={[s.regInput, errors.regName && s.regInputError]}
+                              value={value}
+                              onChangeText={onChange}
+                              onBlur={onBlur}
+                              placeholder="Patient name"
+                              placeholderTextColor="#555"
+                              autoCapitalize="words"
+                            />
+                          )}
+                        />
+                        {errors.regName && (
+                          <Text style={s.errorText}>⚠ {errors.regName.message}</Text>
+                        )}
                       </View>
+
                       <View style={s.regRow}>
+                        {/* ── Age Field ──────────────────────────────────────────────────────
+                            Rules:
+                              • NOT required — patient may be unknown
+                              • If filled: digits only, 1–120
+                              • validate: conditional — only run range check when non-empty
+                                so an empty field passes without showing an error
+                        */}
                         <View style={[s.regField, { flex: 1 }]}>
                           <Text style={s.regLabel}>Age</Text>
-                          <TextInput style={s.regInput} value={regAge} onChangeText={setRegAge} placeholder="Age" placeholderTextColor="#333" keyboardType="numeric" maxLength={3} />
+                          <Controller
+                            control={control}
+                            name="regAge"
+                            rules={{
+                              pattern: {
+                                value: /^[0-9]*$/,
+                                message: 'Numbers only',
+                              },
+                              validate: (v) => {
+                                if (!v || v === '') return true; // optional field
+                                const n = Number(v);
+                                if (n < 1) return 'Age must be at least 1';
+                                if (n > 120) return 'Age cannot exceed 120';
+                                return true;
+                              },
+                            }}
+                            render={({ field: { onChange, onBlur, value } }) => (
+                              <TextInput
+                                style={[s.regInput, errors.regAge && s.regInputError]}
+                                value={value}
+                                onChangeText={onChange}
+                                onBlur={onBlur}
+                                placeholder="Age"
+                                placeholderTextColor="#555"
+                                keyboardType="numeric"
+                                maxLength={3}
+                              />
+                            )}
+                          />
+                          {errors.regAge && (
+                            <Text style={s.errorText}>⚠ {errors.regAge.message}</Text>
+                          )}
                         </View>
+
+                        {/* ── Mobile Field ───────────────────────────────────────────────────
+                            Rules:
+                              • required
+                              • maxLength={10} on TextInput — keyboard never allows >10 chars
+                              • validate function gives two distinct messages:
+                                  – "must be 10 digits" when length < 10 (partial input)
+                                  – "digits only" when non-numeric chars sneak in
+                                This is clearer than a single pattern error message.
+                        */}
                         <View style={[s.regField, { flex: 2 }]}>
                           <Text style={s.regLabel}>Mobile Number <Text style={s.req}>*</Text></Text>
-                          <TextInput style={s.regInput} value={regMobile} onChangeText={setRegMobile} placeholder="Mobile" placeholderTextColor="#333" keyboardType="phone-pad" maxLength={15} />
+                          <Controller
+                            control={control}
+                            name="regMobile"
+                            rules={{
+                              required: 'Mobile number is required',
+                              validate: (v) => {
+                                if (!/^[0-9]+$/.test(v)) return 'Mobile number must contain digits only';
+                                if (v.length < 10) return `Mobile number must be 10 digits (${v.length}/10 entered)`;
+                                if (v.length > 10) return 'Mobile number must be exactly 10 digits'; // safety net
+                                return true;
+                              },
+                            }}
+                            render={({ field: { onChange, onBlur, value } }) => (
+                              <TextInput
+                                style={[s.regInput, errors.regMobile && s.regInputError]}
+                                value={value}
+                                onChangeText={(text) => {
+                                  // Strip non-digits client-side before sending to onChange
+                                  // so the validate function always receives a clean string
+                                  onChange(text.replace(/[^0-9]/g, ''));
+                                }}
+                                onBlur={onBlur}
+                                placeholder="10-digit mobile"
+                                placeholderTextColor="#555"
+                                keyboardType="phone-pad"
+                                maxLength={10}
+                              />
+                            )}
+                          />
+                          {errors.regMobile && (
+                            <Text style={s.errorText}>⚠ {errors.regMobile.message}</Text>
+                          )}
                         </View>
                       </View>
+
+                      {/* ── Gender Field ──────────────────────────────────────────────────── */}
                       <View style={s.regField}>
                         <Text style={s.regLabel}>Gender <Text style={s.req}>*</Text></Text>
-                        <View style={s.regGenderRow}>
-                          {['Male', 'Female', 'Other'].map(g => (
-                            <TouchableOpacity key={g} style={[s.genderBtn, regGender === g && s.genderBtnSelected]} onPress={() => setRegGender(g)}>
-                              <Text style={[s.genderBtnText, regGender === g && s.genderBtnTextSelected]}>{g}</Text>
-                            </TouchableOpacity>
-                          ))}
-                        </View>
+                        <Controller
+                          control={control}
+                          name="regGender"
+                          rules={{ required: 'Please select a gender' }}
+                          render={({ field: { onChange, value } }) => (
+                            <View style={s.regGenderRow}>
+                              {['Male', 'Female', 'Other'].map(g => (
+                                <TouchableOpacity
+                                  key={g}
+                                  style={[s.genderBtn, value === g && s.genderBtnSelected]}
+                                  onPress={() => onChange(g)}
+                                >
+                                  <Text style={[s.genderBtnText, value === g && s.genderBtnTextSelected]}>{g}</Text>
+                                </TouchableOpacity>
+                              ))}
+                            </View>
+                          )}
+                        />
+                        {errors.regGender && (
+                          <Text style={s.errorText}>⚠ {errors.regGender.message}</Text>
+                        )}
                       </View>
-                      <TouchableOpacity style={s.checkRow} onPress={() => setRegGlasses(v => !v)} activeOpacity={0.7}>
-                        <View style={[s.checkbox, regGlasses && s.checkboxChecked]}>{regGlasses && <Text style={s.checkmark}>✓</Text>}</View>
-                        <Text style={s.checkLabel}>Currently wearing glasses / contact lenses</Text>
-                      </TouchableOpacity>
+
+                      {/* ── Glasses Checkbox ─────────────────────────────────────────────── */}
+                      <Controller
+                        control={control}
+                        name="regGlasses"
+                        render={({ field: { onChange, value } }) => (
+                          <TouchableOpacity style={s.checkRow} onPress={() => onChange(!value)} activeOpacity={0.7}>
+                            <View style={[s.checkbox, value && s.checkboxChecked]}>{value && <Text style={s.checkmark}>✓</Text>}</View>
+                            <Text style={s.checkLabel}>Currently wearing glasses / contact lenses</Text>
+                          </TouchableOpacity>
+                        )}
+                      />
+
+                      {/* ── Allergies ────────────────────────────────────────────────────── */}
                       <View style={s.regField}>
                         <Text style={s.regLabel}>Known Allergies</Text>
-                        <View style={s.allergyGrid}>
-                          {ALLERGY_OPTIONS.map(a => (
-                            <TouchableOpacity key={a.key} style={[s.allergyChip, regAllergies[a.key] && s.allergyChipSelected]} onPress={() => setRegAllergies(prev => ({ ...prev, [a.key]: !prev[a.key] }))} activeOpacity={0.7}>
-                              <Text style={[s.allergyChipText, regAllergies[a.key] && s.allergyChipTextSelected]}>{a.label}</Text>
-                            </TouchableOpacity>
-                          ))}
-                        </View>
+                        <Controller
+                          control={control}
+                          name="regAllergies"
+                          render={({ field: { onChange, value } }) => (
+                            <View style={s.allergyGrid}>
+                              {ALLERGY_OPTIONS.map(a => (
+                                <TouchableOpacity
+                                  key={a.key}
+                                  style={[s.allergyChip, value[a.key] && s.allergyChipSelected]}
+                                  onPress={() => onChange({ ...value, [a.key]: !value[a.key] })}
+                                  activeOpacity={0.7}
+                                >
+                                  <Text style={[s.allergyChipText, value[a.key] && s.allergyChipTextSelected]}>{a.label}</Text>
+                                </TouchableOpacity>
+                              ))}
+                            </View>
+                          )}
+                        />
                       </View>
-                      <TouchableOpacity style={[s.regBtn, !regDetailsValid && s.regBtnDisabled]} onPress={goToAssistantStep} disabled={!regDetailsValid} activeOpacity={0.85}>
+
+                      {/* ── Next Button ───────────────────────────────────────────────────
+                          Disabled when isValid is false.
+                          With mode:'all', isValid reflects the true validity of the whole
+                          form — it is false until Name (required, ≥2 chars), Mobile
+                          (required, 10 digits), and Gender (required) all pass.
+                          Age is optional so it doesn't block the button unless the user
+                          typed an out-of-range value.
+                      */}
+                      <TouchableOpacity
+                        style={[s.regBtn, !isValid && s.regBtnDisabled]}
+                        onPress={handleSubmit(onDetailsSubmit)}
+                        disabled={!isValid}
+                        activeOpacity={0.85}
+                      >
                         <Text style={s.regBtnText}>Next — Choose Assistant →</Text>
                       </TouchableOpacity>
                     </>
@@ -803,7 +1043,7 @@ export default function PatientScreen({ route, navigation }) {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // RENDER D: Active VR — Split-screen cardboard (v8.3: +assistantDisconnected)
+  // RENDER D: Active VR — Split-screen cardboard
   // ═══════════════════════════════════════════════════════════════════════════
   return (
     <View style={{ flex: 1, backgroundColor: '#000' }}>
@@ -832,9 +1072,8 @@ export default function PatientScreen({ route, navigation }) {
         nearOptotype={nearOptotype}
         isLensCheck={isLensCheck}
         lensCheckEye={lensCheckEye}
-        assistantDisconnected={assistantDisconnected}  // ← v8.3 NEW
+        assistantDisconnected={assistantDisconnected}
       />
-      {/* Mute toggle — always accessible even during disconnect overlay via pointer events */}
       <TouchableOpacity
         style={{
           position: 'absolute', bottom: 20, right: 20,
@@ -848,6 +1087,16 @@ export default function PatientScreen({ route, navigation }) {
       >
         <Text style={{ fontSize: 20 }}>{rtcState.isMuted ? '🔇' : '🎙'}</Text>
       </TouchableOpacity>
+
+      {isComplete && (
+        <TouchableOpacity
+          style={s.vrCompleteDisconnectBtn}
+          onPress={handleSelfDisconnect}
+          activeOpacity={0.85}
+        >
+          <Text style={s.vrCompleteDisconnectText}>⏏ Disconnect</Text>
+        </TouchableOpacity>
+      )}
     </View>
   );
 }
@@ -881,6 +1130,8 @@ const s = StyleSheet.create({
   regLabel: { color: '#aaa', fontSize: 12, fontWeight: '500', letterSpacing: 0.4 },
   req: { color: '#7c7cf0' },
   regInput: { backgroundColor: '#0d0d1a', borderWidth: 1, borderColor: '#2a2a40', borderRadius: 10, color: '#e8e8f0', fontSize: 14, paddingVertical: 12, paddingHorizontal: 14 },
+  regInputError: { borderColor: '#ef5350' },
+  errorText: { color: '#ef5350', fontSize: 11, marginTop: -4 },
   regRow: { flexDirection: 'row', gap: 12 },
   regGenderRow: { flexDirection: 'row', gap: 6, flexWrap: 'wrap' },
   genderBtn: { paddingVertical: 8, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1, borderColor: '#2a2a40', backgroundColor: '#0d0d1a' },
@@ -922,4 +1173,22 @@ const s = StyleSheet.create({
   errorBannerText: { color: '#ff6666', fontSize: 12, lineHeight: 18 },
   overlay: { flex: 1, backgroundColor: '#080820', alignItems: 'center', justifyContent: 'center' },
   startCard: { alignItems: 'center', gap: 18, paddingTop: 44, paddingBottom: 36, paddingHorizontal: 40, backgroundColor: 'rgba(255,255,255,0.025)', borderWidth: 1, borderColor: 'rgba(124,124,240,0.22)', borderRadius: 20, width: Math.min(360, W * 0.88), shadowColor: '#5b5bd6', shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.3, shadowRadius: 24, elevation: 10 },
+
+  hostDisconnectBtn: {
+    marginTop: 12, paddingVertical: 9, paddingHorizontal: 24,
+    borderRadius: 100, borderWidth: 1,
+    borderColor: 'rgba(229,57,53,0.35)',
+    backgroundColor: 'rgba(229,57,53,0.07)',
+  },
+  hostDisconnectText: { color: '#ef5350', fontSize: 13, fontWeight: '500' },
+
+  vrCompleteDisconnectBtn: {
+    position: 'absolute', bottom: 76, right: 16,
+    paddingVertical: 8, paddingHorizontal: 16,
+    borderRadius: 100, borderWidth: 1,
+    borderColor: 'rgba(229,57,53,0.45)',
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    zIndex: 201,
+  },
+  vrCompleteDisconnectText: { color: '#ef9a9a', fontSize: 12, fontWeight: '600' },
 });

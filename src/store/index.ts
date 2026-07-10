@@ -7,7 +7,6 @@ import wifiReducer from './slices/wifiSlice';
 import peerReducer from './slices/peerSlice';
 import resultReducer from './slices/resultSlice';
 
-
 export const store = configureStore({
     reducer: {
         sharing: sharingReducer,

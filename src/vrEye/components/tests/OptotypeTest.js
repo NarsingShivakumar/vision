@@ -69,7 +69,7 @@ export const NEAR_LINES = [
 const NEAR_FONT_SIZES = [39, 29, 23, 16, 13, 8];
 
 // ─────────────────────────────────────────────────────────────────────────────
-function OptotypeTest({ optotype, showLeft, showRight, phase, panelWidth, panelHeight, parallax }) {
+function OptotypeTest({ optotype, showLeft, showRight, phase, panelWidth, panelHeight, parallax, fixedPreviewSize }) {
   const screen = Dimensions.get('window');
   // In landscape VR: full screen width = both eye panels combined
   const screenW = Math.max(screen.width, screen.height);   // landscape width
@@ -82,12 +82,11 @@ function OptotypeTest({ optotype, showLeft, showRight, phase, panelWidth, panelH
   const runningAnim = useRef(null);
 
   // ── Calibrated font size — Angular calibratedFontSizePx getter ────────────
-  const fontSize = optotype
-    ? calibrationService.calibratedFontSizePx(optotype.sizeLevel ?? 0, screenW, screenH)
-    : 48;
+  const fontSize = fixedPreviewSize
+    ? fixedPreviewSize
+    : (optotype ? calibrationService.calibratedFontSizePx(optotype.sizeLevel ?? 0, screenW, screenH) : 48);
   const rotation = optotype?.rotation ?? 0;
   const letter = optotype?.letter ?? 'E';
-
 
   // ── Disc size — Angular .ar-optotype-disc updated rule ────────────────────
   // Angular: width: min(80dvh, 45dvw)  per-panel

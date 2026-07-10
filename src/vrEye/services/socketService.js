@@ -35,12 +35,14 @@ const VR_EVENTS = [
   // ── v1.2 additions ──────────────────────────────────────────────────────
   'assistant_disconnected', // fires when the assistant's socket drops mid-session
   'result_ready',           // fires when the vision report PDF is ready; payload: { resultId }
+  'call_declined',
 ];
 
 class SocketService {
   constructor() {
     this.socket = null;
     this.listeners = {};
+    this.anyListeners = [];
   }
 
   // ─── Connection ────────────────────────────────────────────────────────────
@@ -66,6 +68,7 @@ class SocketService {
       const payload = { role };
       if (assistantId) payload.assistantId = assistantId;
 
+      console.log('[Socket Emit] register_role', JSON.stringify(payload));
       this.socket.emit('register_role', payload);
       this._emitLocal('connect');
     });
@@ -77,6 +80,7 @@ class SocketService {
 
     VR_EVENTS.forEach(event => {
       this.socket.on(event, data => {
+        console.log(`[Socket Received] ${event}`, data ? JSON.stringify(data) : 'No payload');
         this._emitLocal(event, data);
       });
     });
@@ -145,6 +149,7 @@ class SocketService {
    */
   emit(event, data) {
     if (this.socket?.connected) {
+      console.log(`[Socket Emit] ${event}`, data ? JSON.stringify(data) : 'No payload');
       this.socket.emit(event, data);
     } else {
       console.warn('[Socket] Not connected — cannot emit', event);

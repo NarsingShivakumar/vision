@@ -3,12 +3,8 @@ import { View, Text, TouchableOpacity, StyleSheet, ActivityIndicator, Alert } fr
 import Pdf from 'react-native-pdf';
 import RNFS from 'react-native-fs';
 import RNPrint from 'react-native-print';
+import Share from 'react-native-share';
 import { useSelector } from 'react-redux';
-
-// Assuming you have your printer modules exported/imported somewhere in your app.
-// Update these imports to match your actual ESC/POS or thermal printer package.
-// import { Printer, PrinterConstants } from 'react-native-esc-pos-printer';
-// import { usePrinter } from '../hooks/usePrinter'; // Example hook if you store printers
 
 // ── Thermal Text Formatter ───────────────────────────────────────────────────
 const getThermalVisionText = (data) => {
@@ -61,21 +57,20 @@ export default function VisionResultView({
     patientName,
     roomCode,
     resultPdfUri,
-    onEndSession
+    onEndSession,
+    onDisconnect,
 }) {
     const [pdfError, setPdfError] = useState(null);
     const [isPrintingPDF, setIsPrintingPDF] = useState(false);
     const [isPrintingThermal, setIsPrintingThermal] = useState(false);
+    const [isSharing, setIsSharing] = useState(false);
 
-    // Grab the JSON data fetched via Redux
     const { data: resultData, loading: resultLoading } = useSelector((state) => state.result);
 
-    // You will need to bring in your printer discovery logic here.
-    // For example: const { start, printers } = usePrinter();
-    const printers = []; // MOCKED: Replace with your actual printer array state
-    const start = async () => { }; // MOCKED: Replace with your actual discovery function
+    const printers = []; // MOCKED
+    const start = async () => { }; // MOCKED
 
-    // ── Print: Normal PDF ──────────────────────────────────────────────────────
+    // ── Helper: Download PDF locally ───────────────────────────────────────────
     const downloadPdfForPrint = async (remoteUrl, fileName) => {
         try {
             const localPath = `${RNFS.CachesDirectoryPath}/${fileName}`;
@@ -94,6 +89,30 @@ export default function VisionResultView({
         }
     };
 
+    // ── Share: PDF Document ────────────────────────────────────────────────────
+    const handleShare = async () => {
+        if (!resultPdfUri) return;
+        setIsSharing(true);
+        try {
+            const fileName = `VisionReport_${roomCode}_${Date.now()}.pdf`;
+            const localPath = await downloadPdfForPrint(resultPdfUri, fileName);
+
+            if (localPath) {
+                await Share.open({
+                    title: 'Share Vision Report',
+                    url: `file://${localPath}`,
+                    type: 'application/pdf',
+                });
+                RNFS.unlink(localPath).catch(err => console.log('Cleanup error:', err));
+            }
+        } catch (error) {
+            console.log('Share dismissed or failed:', error);
+        } finally {
+            setIsSharing(false);
+        }
+    };
+
+    // ── Print: Normal PDF ──────────────────────────────────────────────────────
     const handleNormalPrint = async () => {
         if (!resultPdfUri) return;
         setIsPrintingPDF(true);
@@ -103,7 +122,6 @@ export default function VisionResultView({
 
             if (printPath) {
                 await RNPrint.print({ filePath: printPath });
-                // Cleanup after print dialog opens
                 RNFS.unlink(printPath).catch(err => console.log('Cleanup error:', err));
             }
         } catch (error) {
@@ -131,35 +149,6 @@ export default function VisionResultView({
                 return;
             }
 
-            // Assuming Printer and PrinterConstants are imported properly at the top
-            /*
-            const printerInstance = new Printer({
-              target: printers[0].target, 
-              deviceName: printers[0].deviceName,
-            });
-      
-            const receiptText = getThermalVisionText(resultData);
-      
-            await printerInstance.addQueueTask(async () => {
-              await Printer.tryToConnectUntil(
-                printerInstance,
-                (status) => status.online.statusCode === PrinterConstants.TRUE
-              );
-      
-              await printerInstance.addText(receiptText, {
-                alignment: "left",
-                font: "A",
-                emphasized: true,
-              });
-      
-              await printerInstance.addFeedLine(2);
-              await printerInstance.addCut();
-              await printerInstance.sendData();
-              await printerInstance.disconnect();
-              return "Success";
-            });
-            */
-
             console.log("Mock Thermal Print Success:\n", getThermalVisionText(resultData));
             Alert.alert("Success", "Vision report sent to thermal printer!");
 
@@ -172,43 +161,63 @@ export default function VisionResultView({
     };
 
     return (
-        <View style={{ flex: 1 }}>
+        <View style={rs.container}>
             {/* Header */}
             <View style={rs.header}>
-                <View style={{ flex: 1 }}>
+                <View style={rs.titleContainer}>
                     <Text style={rs.eyebrow}>Vision Screening Result</Text>
                     <Text style={rs.title}>{patientName || 'Patient'}</Text>
-                    {roomCode ? <Text style={rs.room}>Room: {roomCode}</Text> : null}
                 </View>
 
-                <View style={{ gap: 8, flexDirection: 'row' }}>
-                    <TouchableOpacity
-                        style={rs.printBtn}
-                        onPress={handleThermalPrint}
-                        disabled={isPrintingThermal || resultLoading}
-                    >
-                        {isPrintingThermal || resultLoading ? (
-                            <ActivityIndicator color="#000" size="small" />
-                        ) : (
-                            <Text style={rs.printBtnText}>🖨️ Receipt</Text>
-                        )}
-                    </TouchableOpacity>
+                {/* Buttons Container: Column layout with two rows */}
+                <View style={rs.buttonColumn}>
 
-                    <TouchableOpacity
-                        style={rs.printBtn}
-                        onPress={handleNormalPrint}
-                        disabled={isPrintingPDF || !resultPdfUri}
-                    >
-                        {isPrintingPDF ? (
-                            <ActivityIndicator color="#000" size="small" />
-                        ) : (
-                            <Text style={rs.printBtnText}>📄 A4 Print</Text>
-                        )}
-                    </TouchableOpacity>
+                    {/* Row 1: Share & Receipt */}
+                    <View style={rs.buttonRow}>
+                        <TouchableOpacity
+                            style={[rs.printBtn, rs.shareBtn]}
+                            onPress={handleShare}
+                            disabled={isSharing || !resultPdfUri}
+                        >
+                            {isSharing ? (
+                                <ActivityIndicator color="#000" size="small" />
+                            ) : (
+                                <Text style={rs.printBtnText}>📤 Share</Text>
+                            )}
+                        </TouchableOpacity>
 
-                    <TouchableOpacity style={rs.newSessionBtn} onPress={onEndSession}>
-                        <Text style={rs.newSessionBtnText}>New Session</Text>
-                    </TouchableOpacity>
+                        <TouchableOpacity
+                            style={rs.printBtn}
+                            onPress={handleThermalPrint}
+                            disabled={isPrintingThermal || resultLoading}
+                        >
+                            {isPrintingThermal || resultLoading ? (
+                                <ActivityIndicator color="#000" size="small" />
+                            ) : (
+                                <Text style={rs.printBtnText}>🖨️ Receipt</Text>
+                            )}
+                        </TouchableOpacity>
+                    </View>
+
+                    {/* Row 2: A4 Print & New Session */}
+                    <View style={rs.buttonRow}>
+                        <TouchableOpacity
+                            style={rs.printBtn}
+                            onPress={handleNormalPrint}
+                            disabled={isPrintingPDF || !resultPdfUri}
+                        >
+                            {isPrintingPDF ? (
+                                <ActivityIndicator color="#000" size="small" />
+                            ) : (
+                                <Text style={rs.printBtnText}>📄 A4 Print</Text>
+                            )}
+                        </TouchableOpacity>
+
+                        <TouchableOpacity style={rs.newSessionBtn} onPress={onEndSession}>
+                            <Text style={rs.newSessionBtnText}>New Session</Text>
+                        </TouchableOpacity>
+                    </View>
+
                 </View>
             </View>
 
@@ -231,8 +240,8 @@ export default function VisionResultView({
                 {pdfError ? (
                     <View style={rs.pdfErrorBox}>
                         <Text style={rs.pdfErrorText}>⚠ {pdfError}</Text>
-                        <TouchableOpacity onPress={() => setPdfError(null)} style={{ marginTop: 8 }}>
-                            <Text style={{ color: '#7c7cf0', fontSize: 12 }}>Dismiss</Text>
+                        <TouchableOpacity onPress={() => setPdfError(null)} style={rs.dismissBtn}>
+                            <Text style={rs.dismissText}>Dismiss</Text>
                         </TouchableOpacity>
                     </View>
                 ) : null}
@@ -242,18 +251,114 @@ export default function VisionResultView({
 }
 
 const rs = StyleSheet.create({
-    header: { flexDirection: 'row', alignItems: 'center', padding: 16, backgroundColor: 'rgba(255,255,255,0.03)', borderBottomWidth: 1, borderBottomColor: 'rgba(124,124,240,0.12)' },
-    eyebrow: { fontSize: 9, fontWeight: '700', letterSpacing: 2, color: '#7c7cf0', textTransform: 'uppercase', marginBottom: 4 },
-    title: { fontSize: 18, fontWeight: '600', color: '#e8e8f0' },
-    room: { fontSize: 11, color: '#555', marginTop: 3 },
-    printBtn: { paddingVertical: 8, paddingHorizontal: 12, backgroundColor: '#f9a825', borderRadius: 8, justifyContent: 'center' },
-    printBtnText: { color: '#000', fontSize: 12, fontWeight: '700' },
-    newSessionBtn: { paddingVertical: 8, paddingHorizontal: 14, backgroundColor: 'rgba(91,91,214,0.15)', borderWidth: 1, borderColor: 'rgba(91,91,214,0.3)', borderRadius: 8, justifyContent: 'center' },
-    newSessionBtnText: { color: '#7c7cf0', fontSize: 12, fontWeight: '600' },
-    pdfSection: { flex: 1, backgroundColor: '#000' },
-    pdf: { flex: 1, width: '100%' },
-    noPdfBox: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 16 },
-    noPdfText: { color: '#666', fontSize: 13 },
-    pdfErrorBox: { position: 'absolute', bottom: 20, left: 16, right: 16, backgroundColor: 'rgba(204,51,51,0.9)', borderRadius: 12, padding: 14, alignItems: 'center' },
-    pdfErrorText: { color: '#fff', fontSize: 13, textAlign: 'center' },
+    container: {
+        flex: 1,
+    },
+    header: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        padding: 16,
+        backgroundColor: 'rgba(255,255,255,0.03)',
+        borderBottomWidth: 1,
+        borderBottomColor: 'rgba(124,124,240,0.12)',
+    },
+    titleContainer: {
+        flex: 1,
+    },
+    eyebrow: {
+        fontSize: 9,
+        fontWeight: '700',
+        letterSpacing: 2,
+        color: '#7c7cf0',
+        textTransform: 'uppercase',
+        marginBottom: 4,
+    },
+    title: {
+        fontSize: 18,
+        fontWeight: '600',
+        color: '#e8e8f0',
+    },
+    room: {
+        fontSize: 11,
+        color: '#555',
+        marginTop: 3,
+    },
+    buttonColumn: {
+        flexDirection: 'column',
+        gap: 8,
+        alignItems: 'flex-end',
+    },
+    buttonRow: {
+        flexDirection: 'row',
+        gap: 8,
+    },
+    printBtn: {
+        paddingVertical: 8,
+        paddingHorizontal: 12,
+        backgroundColor: '#f9a825',
+        borderRadius: 8,
+        justifyContent: 'center',
+    },
+    shareBtn: {
+        backgroundColor: '#4caf50',
+    },
+    printBtnText: {
+        color: '#000',
+        fontSize: 12,
+        fontWeight: '700',
+    },
+    newSessionBtn: {
+        paddingVertical: 8,
+        paddingHorizontal: 14,
+        backgroundColor: 'rgba(91,91,214,0.15)',
+        borderWidth: 1,
+        borderColor: 'rgba(91,91,214,0.3)',
+        borderRadius: 8,
+        justifyContent: 'center',
+    },
+    newSessionBtnText: {
+        color: '#7c7cf0',
+        fontSize: 12,
+        fontWeight: '600',
+    },
+    pdfSection: {
+        flex: 1,
+        backgroundColor: '#000',
+    },
+    pdf: {
+        flex: 1,
+        width: '100%',
+    },
+    noPdfBox: {
+        flex: 1,
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 16,
+    },
+    noPdfText: {
+        color: '#666',
+        fontSize: 13,
+    },
+    pdfErrorBox: {
+        position: 'absolute',
+        bottom: 20,
+        left: 16,
+        right: 16,
+        backgroundColor: 'rgba(204,51,51,0.9)',
+        borderRadius: 12,
+        padding: 14,
+        alignItems: 'center',
+    },
+    pdfErrorText: {
+        color: '#fff',
+        fontSize: 13,
+        textAlign: 'center',
+    },
+    dismissBtn: {
+        marginTop: 8,
+    },
+    dismissText: {
+        color: '#7c7cf0',
+        fontSize: 12,
+    }
 });

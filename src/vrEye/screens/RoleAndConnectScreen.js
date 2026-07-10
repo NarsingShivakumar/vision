@@ -1,20 +1,21 @@
 /**
- * RoleAndConnectScreen.js v3.0 — WiFi Guard + Redux
+ * RoleAndConnectScreen.js v3.2 — WiFi Guard + Redux
  *
- * Changes from v2.0:
- * - ADD: `reconnectFailed` tracked in peerStatus
- * - ADD: HOST panel "Server still running" recovery banner when controller disconnects
- * - ADD: CONTROLLER panel "↺ Retry" manual reconnect button after auto-reconnect exhausts
- * - ADD: `reconnectfailed` listener wired in peer useEffect
- * - FIX: `connected` listener clears `reconnectFailed` flag
+ * Changes from v3.1:
+ * - FIX: Remove try/catch camera guard and cameraAvailable flag — caused "Camera unavailable"
+ * - FIX: Switch from useCameraDevice('back') to useCameraDevices() with Scan.js fallback chain
+ *        (back → external → front → first available)
+ * - FIX: All camera hooks now called unconditionally (no conditional hook calls)
+ * - FIX: "No camera" state now shows spinner instead of error (matches Scan.js loading pattern)
+ * - KEEP: bestFormat picker, targetFps, auto-zoom, pulse animation, torch chip, 800ms debounce
  */
 
 import React, {
-  useState, useEffect, useRef, useCallback, memo,
+  useState, useEffect, useRef, useCallback, useMemo, memo,
 } from 'react';
 import {
   View, Text, TouchableOpacity, TextInput, StyleSheet,
-  Dimensions, Platform, ActivityIndicator, Animated,
+  Dimensions, Platform, ActivityIndicator, Animated, Easing,
   ScrollView, StatusBar, Vibration, Alert,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
@@ -27,27 +28,18 @@ import { NetworkInfo } from 'react-native-network-info';
 import UdpSocket from 'react-native-udp';
 import QRCode from 'react-native-qrcode-svg';
 
-// Vision Camera — graceful fallback
-let Camera = null;
-let useCameraDevice = null;
-let useCameraPermission = null;
-let useCodeScanner = null;
-try {
-  const vc = require('react-native-vision-camera');
-  Camera = vc.Camera;
-  useCameraDevice = vc.useCameraDevice;
-  useCameraPermission = vc.useCameraPermission;
-  useCodeScanner = vc.useCodeScanner;
-} catch (e) {
-  console.warn('VisionCamera: react-native-vision-camera not available', e.message);
-}
-const cameraAvailable = !!(Camera && useCameraDevice && useCameraPermission && useCodeScanner);
+import {
+  Camera,
+  useCameraDevices,
+  useCameraPermission,
+  useCodeScanner,
+} from 'react-native-vision-camera';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const TCP_PORT = 54321;
 const UDP_PORT = 54322;
-const BEACON_INTERVAL = 2000;   // ms between UDP broadcasts
-const DISCOVERY_TTL = 15000;  // ms a discovered host stays alive
+const BEACON_INTERVAL = 2000;
+const DISCOVERY_TTL = 2000;
 
 const { width: W, height: H } = Dimensions.get('window');
 
@@ -66,7 +58,7 @@ export default function RoleAndConnectScreen({ navigation }) {
     connecting: false,
     reconnecting: false,
     reconnectAttempt: 0,
-    reconnectFailed: false,   // NEW
+    reconnectFailed: false,
     rtt: null,
     error: null,
   });
@@ -92,7 +84,7 @@ export default function RoleAndConnectScreen({ navigation }) {
   const peerUnsubs = useRef([]);
 
   // ── Wi-Fi guard (Redux) ─────────────────────────────────────────────────
-  useWifiGuard(); // starts Redux wifi monitoring for this screen
+  useWifiGuard();
 
   // ── Peer service listeners ──────────────────────────────────────────────────
   useEffect(() => {
@@ -108,7 +100,7 @@ export default function RoleAndConnectScreen({ navigation }) {
         connected: true,
         connecting: false,
         reconnecting: false,
-        reconnectFailed: false,  // clear
+        reconnectFailed: false,
         error: null,
         peerAddress: address,
       }))
@@ -129,7 +121,6 @@ export default function RoleAndConnectScreen({ navigation }) {
       }))
     ));
 
-    // NEW: reconnect failed
     U.push(localPeerService.on('reconnectfailed', ({ attempts }) =>
       setPeerStatus((p) => ({
         ...p,
@@ -173,6 +164,7 @@ export default function RoleAndConnectScreen({ navigation }) {
 
   // ── HOST: fetch IP + start server ──────────────────────────────────────────
   const startHost = useCallback(async () => {
+    stopUdpBeacon();
     setStep('host');
     setPeerStatus((p) => ({ ...p, connecting: true }));
     try {
@@ -196,15 +188,31 @@ export default function RoleAndConnectScreen({ navigation }) {
       const sock = UdpSocket.createSocket({ type: 'udp4', reusePort: true });
       udpRef.current = sock;
       let sockClosed = false;
-      sock.bind(0, () => {
+
+      // 1. Bind explicitly to the resolved local IP, not 0.0.0.0
+      sock.bind(0, ip, () => {
         try { sock.setBroadcast(true); } catch { }
         const msg = JSON.stringify({
           t: 'vreyehost', ip, port, code, name: `VREye-${code}`,
         });
         const buf = Buffer.from(msg);
+
+        // 2. Calculate a directed subnet broadcast (assumes standard /24 subnet)
+        // e.g., 192.168.43.1 -> 192.168.43.255
+        const subnetBroadcast = ip.includes('.')
+          ? ip.split('.').slice(0, 3).join('.') + '.255'
+          : '255.255.255.255';
+
         const broadcast = () => {
           if (sockClosed) return;
-          try { sock.send(buf, 0, buf.length, UDP_PORT, '255.255.255.255'); } catch { }
+          try {
+            // Send to the specific subnet to bypass cellular routing traps
+            sock.send(buf, 0, buf.length, UDP_PORT, subnetBroadcast);
+            // Send global as a fallback for standard routers
+            if (subnetBroadcast !== '255.255.255.255') {
+              sock.send(buf, 0, buf.length, UDP_PORT, '255.255.255.255');
+            }
+          } catch { }
         };
         broadcast();
         beaconRef.current = setInterval(broadcast, BEACON_INTERVAL);
@@ -225,12 +233,20 @@ export default function RoleAndConnectScreen({ navigation }) {
     if (!UdpSocket) return;
 
     let sock;
+    let sockClosed = false;
+    let mounted = true;
     try {
       sock = UdpSocket.createSocket({ type: 'udp4', reusePort: true });
       sock.bind(UDP_PORT, () => {
         try { sock.setBroadcast(true); } catch { }
       });
+      sock.on('close', () => { sockClosed = true; });
+      sock.on('error', (e) => {
+        console.warn('[Discovery] Socket error:', e.message);
+        sockClosed = true;
+      });
       sock.on('message', (data) => {
+        if (sockClosed || !mounted) return;
         try {
           const msg = JSON.parse(data.toString());
           if (msg.t !== 'vreyehost') return;
@@ -252,10 +268,14 @@ export default function RoleAndConnectScreen({ navigation }) {
     }
 
     const pruner = setInterval(() => {
-      setDiscovered((prev) => prev.filter((h) => Date.now() - h.ts < DISCOVERY_TTL));
+      if (mounted) {
+        setDiscovered((prev) => prev.filter((h) => Date.now() - h.ts < DISCOVERY_TTL));
+      }
     }, 3000);
 
     return () => {
+      mounted = false;
+      sockClosed = true;
       try { sock?.close(); } catch { }
       clearInterval(pruner);
     };
@@ -267,12 +287,35 @@ export default function RoleAndConnectScreen({ navigation }) {
     localPeerService.connectToHost(ip, parseInt(port, 10) || TCP_PORT);
   }, []);
 
-  const connectManual = useCallback(() => {
+  const connectManual = useCallback(async () => {
     const ip = manualIp.trim();
     if (!ip) {
       Alert.alert('Enter IP', 'Please enter the host device IP address.');
       return;
     }
+
+    // 1. Validate IP Format
+    const ipRegex = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
+    if (!ipRegex.test(ip)) {
+      setPeerStatus((p) => ({ ...p, error: '⚠ YOU HAVE ENTERED WRONG IP ADDRESS', connecting: false }));
+      return;
+    }
+
+    // 2. Prevent self-connection (Controller trying to connect to itself)
+    try {
+      const myIp = await NetworkInfo?.getIPV4Address?.() ?? await NetworkInfo?.getIPAddress?.();
+      if (ip === myIp) {
+        setPeerStatus((p) => ({
+          ...p,
+          error: 'This device cannot be used as both the Controller Host. Please use a different device.',
+          connecting: false
+        }));
+        return;
+      }
+    } catch (e) {
+      console.warn('Failed to get local IP', e);
+    }
+
     connectToHost(ip, manualPort);
   }, [manualIp, manualPort, connectToHost]);
 
@@ -310,6 +353,15 @@ export default function RoleAndConnectScreen({ navigation }) {
       udpRef.current = null;
     };
   }, []);
+  const stopUdpBeacon = useCallback(() => {
+    if (beaconRef.current) {
+      clearInterval(beaconRef.current);
+      beaconRef.current = null;
+    }
+    try { udpRef.current?.close(); } catch { }
+    udpRef.current = null;
+  }, []);
+
 
   // ═══════════════════════════════════════════════════════════════════════════
   // RENDER — Role selection
@@ -342,6 +394,7 @@ export default function RoleAndConnectScreen({ navigation }) {
             >
               <BackBtn onPress={() => {
                 localPeerService.destroy();
+                stopUdpBeacon();
                 setStep('role');
                 setPeerStatus((p) => ({ ...p, connecting: false }));
                 setServerReady(false);
@@ -387,13 +440,13 @@ export default function RoleAndConnectScreen({ navigation }) {
               <View style={r.codeCard}>
                 <Text style={r.codeLabel}>PAIRING CODE</Text>
                 <Text style={r.codeValue}>{pairingCode}</Text>
-                <TouchableOpacity
+                {/* <TouchableOpacity
                   style={r.refreshBtn}
                   onPress={() => setPairingCode(randomCode())}
                   activeOpacity={0.7}
                 >
                   <Text style={r.refreshText}>New code</Text>
-                </TouchableOpacity>
+                </TouchableOpacity> */}
               </View>
 
               {/* IP */}
@@ -426,11 +479,7 @@ export default function RoleAndConnectScreen({ navigation }) {
                 )}
               </View>
 
-              {/*
-              ── NEW: Controller disconnection recovery banner ──────────────────
-              Shown when the server is running but controller dropped.
-              HOST never needs to act — server stays open automatically.
-            */}
+              {/* Controller disconnection recovery banner */}
               {serverReady && !peerStatus.connected && !peerStatus.connecting && (
                 <View style={r.recoveryBanner}>
                   <PulsingDot color="#f9a825" />
@@ -461,8 +510,12 @@ export default function RoleAndConnectScreen({ navigation }) {
           <StatusBar barStyle="light-content" />
 
           <View style={r.ctrlTop}>
-            <BackBtn onPress={() => setStep('role')} />
-            <View style={r.headerRow}>
+            <BackBtn onPress={() => {
+              // Destroy any stuck connection attempt and reset status
+              localPeerService.destroy();
+              setPeerStatus({ connected: false, connecting: false, reconnecting: false, reconnectAttempt: 0, reconnectFailed: false, rtt: null, error: null });
+              setStep('role');
+            }} />            <View style={r.headerRow}>
               <View style={[r.rolePill, r.rolePillCtrl]}>
                 <Text style={r.rolePillText}>CONTROLLER</Text>
               </View>
@@ -529,11 +582,7 @@ export default function RoleAndConnectScreen({ navigation }) {
               />
             )}
 
-            {/*
-            ── NEW: Status / reconnection bar ──────────────────────────────────
-            Shows connecting spinner, reconnecting progress, error message,
-            and a manual "↺ Retry" button when auto-reconnect gives up.
-          */}
+            {/* Status / reconnection bar */}
             {(peerStatus.connecting || peerStatus.error || peerStatus.reconnectFailed) && (
               <View style={[
                 r.ctrlStatus,
@@ -551,7 +600,6 @@ export default function RoleAndConnectScreen({ navigation }) {
                       : 'Connecting…'}
                 </Text>
 
-                {/* Manual retry — visible only after auto-reconnect exhausts */}
                 {peerStatus.reconnectFailed && (
                   <TouchableOpacity
                     style={r.retryBtn}
@@ -718,41 +766,122 @@ const DiscoverTab = memo(({ discovered, connecting, onConnect, udpAvailable }) =
 ));
 
 // ── QR Tab ─────────────────────────────────────────────────────────────────────
+// Matches Scan.js exactly:
+//  - useCameraDevices() (plural) with same fallback chain: external → back → front → first
+//  - ActivityIndicator spinner while device resolves (no "unavailable" error screen)
+//  - useMemo best-format picker (fps bucket first, then resolution)
+//  - targetFps derived from chosen format's frameRateRanges
+//  - Auto-zoom sweep (0 → min(maxZoom, 2.5) and back, 140 ms steps)
+//  - Pulsing Animated focus box (scale + opacity loop via Easing.inOut)
+//  - Torch toggle chip top-right
+//  - 800 ms scan debounce via lastScanAt ref
 const QRTab = memo(({ onRead, scanning, scanError, connecting }) => {
-  const device = cameraAvailable ? useCameraDevice('back') : null; // eslint-disable-line
-  const { hasPermission, requestPermission } = cameraAvailable // eslint-disable-line
-    ? useCameraPermission()
-    : { hasPermission: false, requestPermission: async () => { } };
+  const devices = useCameraDevices();
+  const { hasPermission, requestPermission } = useCameraPermission();
   const [permRequested, setPermRequested] = useState(false);
+  const [zoom, setZoom] = useState(0);
+  const [torch, setTorch] = useState('off');
+  const lastScanAt = useRef(0);
 
+  // Device fallback chain — identical to Scan.js
+  let device = null;
+  if (devices?.back) device = devices.back;
+  if (!device) {
+    device =
+      devices?.external ||
+      devices?.front ||
+      (devices && Object.values(devices)[0]);
+  }
+
+  // Request permission on mount
   useEffect(() => {
-    if (cameraAvailable && !hasPermission && !permRequested) {
+    if (!hasPermission && !permRequested) {
       setPermRequested(true);
       requestPermission();
     }
   }, [hasPermission, permRequested, requestPermission]);
 
-  const codeScanner = cameraAvailable ? useCodeScanner({ // eslint-disable-line
+  // Best format picker (fps bucket → pixels)
+  const bestFormat = useMemo(() => {
+    if (!device || !Array.isArray(device.formats)) return null;
+    const scoreFormat = (fmt) => {
+      const pw = fmt?.videoWidth || 0;
+      const ph = fmt?.videoHeight || 0;
+      const pixels = pw * ph;
+      const maxFps = (fmt?.frameRateRanges || []).reduce(
+        (m, range) => Math.max(m, range?.maxFrameRate || 0), 0,
+      );
+      const fpsBucket = maxFps >= 55 ? 3 : maxFps >= 29 ? 2 : maxFps >= 24 ? 1 : 0;
+      return fpsBucket * 1e12 + pixels;
+    };
+    const candidates = device.formats.filter(
+      (f) => (f?.videoWidth || 0) >= 720 && (f?.videoHeight || 0) >= 720,
+    );
+    const list = candidates.length ? candidates : device.formats;
+    let best = null; let bestScore = -1;
+    for (const f of list) {
+      const s = scoreFormat(f);
+      if (s > bestScore) { bestScore = s; best = f; }
+    }
+    return best;
+  }, [device]);
+
+  // Target FPS from chosen format
+  const targetFps = useMemo(() => {
+    const ranges = bestFormat?.frameRateRanges || [];
+    const supports30 = ranges.some(
+      (range) => (range?.minFrameRate || 0) <= 30 && 30 <= (range?.maxFrameRate || 0),
+    );
+    if (supports30) return 30;
+    let best = 0;
+    ranges.forEach((range) => { best = Math.max(best, Math.floor(range?.maxFrameRate || 0)); });
+    return Math.max(24, best || 24);
+  }, [bestFormat]);
+
+  // Pulsing focus box
+  const pulse = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, { toValue: 1, duration: 700, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+        Animated.timing(pulse, { toValue: 0, duration: 700, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, []);
+
+  // Auto-zoom sweep
+  useEffect(() => {
+    if (!device || scanning || connecting) return;
+    let mounted = true;
+    const max = Math.min(device?.maxZoom ?? 1, 2.5);
+    const step = 0.08;
+    let dir = 1; let z = 0;
+    const id = setInterval(() => {
+      if (!mounted) return;
+      z += dir * step;
+      if (z >= max) { z = max; dir = -1; }
+      if (z <= 0) { z = 0; dir = 1; }
+      setZoom(z);
+    }, 140);
+    return () => { mounted = false; clearInterval(id); };
+  }, [device, scanning, connecting]);
+
+  // Code scanner with 800 ms debounce
+  const codeScanner = useCodeScanner({
     codeTypes: ['qr'],
     onCodeScanned: (codes) => {
+      const now = Date.now();
+      if (now - lastScanAt.current < 800) return;
+      lastScanAt.current = now;
       if (scanning || connecting) return;
       const first = codes[0];
       if (first?.value) onRead(first.value);
     },
-  }) : null;
+  });
 
-  if (!cameraAvailable) {
-    return (
-      <View style={r.tabContent}>
-        <View style={r.infoBox}>
-          <Text style={r.infoText}>
-            Install <Text style={r.infoEm}>react-native-vision-camera</Text> to enable QR
-            scanning. Use Discovery or Manual instead.
-          </Text>
-        </View>
-      </View>
-    );
-  }
+  // Permission gate
   if (!hasPermission) {
     return (
       <View style={r.tabContent}>
@@ -765,35 +894,73 @@ const QRTab = memo(({ onRead, scanning, scanError, connecting }) => {
       </View>
     );
   }
+
+  // Spinner while device resolves — matches Scan.js loading state
   if (!device) {
     return (
       <View style={r.tabContent}>
-        <View style={r.infoBox}>
-          <Text style={r.infoText}>No back camera found on this device.</Text>
+        <View style={r.cameraContainer}>
+          <View style={r.cameraLoading}>
+            <ActivityIndicator size="large" color="#7c7cf0" />
+            <Text style={r.cameraLoadingText}>Initializing camera…</Text>
+          </View>
         </View>
       </View>
     );
   }
+
   return (
     <View style={r.tabContent}>
-      <Text style={r.qrScanInstr}>Point camera at the QR code shown on the VR host screen</Text>
+      <Text style={r.qrScanInstr}>Align the QR inside the box</Text>
+
       <View style={r.cameraContainer}>
         <Camera
-          style={r.camera}
+          style={StyleSheet.absoluteFill}
           device={device}
           isActive={!scanning && !connecting}
+          format={bestFormat || undefined}
+          fps={targetFps}
           codeScanner={codeScanner}
+          zoom={zoom}
+          torch={torch}
+          enableZoomGesture={true}
         />
+
+        {/* Pulsing focus box overlay */}
         <View style={r.cameraOverlay} pointerEvents="none">
-          <View style={r.scanFrame}>
+          <Animated.View
+            style={[
+              r.scanFrame,
+              {
+                transform: [{ scale: pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.03] }) }],
+                opacity: pulse.interpolate({ inputRange: [0, 1], outputRange: [0.85, 1] }),
+              },
+            ]}
+          >
             <View style={[r.scanCorner, r.scanTL]} />
             <View style={[r.scanCorner, r.scanTR]} />
             <View style={[r.scanCorner, r.scanBL]} />
             <View style={[r.scanCorner, r.scanBR]} />
-          </View>
+            <Text style={r.scanFrameHint}>Place QR here</Text>
+          </Animated.View>
+        </View>
+
+        {/* Torch chip — top-right */}
+        <View style={r.torchBtnWrap}>
+          <TouchableOpacity
+            style={r.torchChip}
+            onPress={() => setTorch((t) => (t === 'off' ? 'on' : 'off'))}
+            activeOpacity={0.8}
+          >
+            <Text style={r.torchChipText}>
+              {torch === 'off' ? '🔦 Torch On' : '💡 Torch Off'}
+            </Text>
+          </TouchableOpacity>
         </View>
       </View>
+
       {scanError ? <Text style={r.scanError}>{scanError}</Text> : null}
+
       {(scanning || connecting) && (
         <View style={r.scanningRow}>
           <ActivityIndicator color="#7c7cf0" size="small" />
@@ -984,7 +1151,7 @@ const r = StyleSheet.create({
   statusText: { flex: 1, color: '#667', fontSize: 13 },
   rttPill: { paddingVertical: 2, paddingHorizontal: 8, backgroundColor: 'rgba(76,175,80,0.12)', borderRadius: 100, color: '#4caf50', fontSize: 11, fontWeight: '600' },
 
-  // NEW: recovery banner
+  // Recovery banner
   recoveryBanner: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, padding: 14, backgroundColor: 'rgba(249,168,37,0.07)', borderWidth: 1, borderColor: 'rgba(249,168,37,0.25)', borderRadius: 14, marginBottom: 12 },
   recoveryTitle: { color: '#f9a825', fontSize: 13, fontWeight: '600' },
   recoverySub: { color: '#666', fontSize: 12, lineHeight: 17, marginTop: 2 },
@@ -1016,17 +1183,57 @@ const r = StyleSheet.create({
   hostCardCodeValue: { color: '#00bc8c', fontSize: 14, fontWeight: '700', fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace', letterSpacing: 2 },
   hostCardArrow: { color: '#00bc8c', fontSize: 16 },
 
-  // QR
+  // QR scanner tab
   qrScanInstr: { color: '#445', fontSize: 12, textAlign: 'center', lineHeight: 18 },
-  cameraContainer: { height: 260, borderRadius: 18, overflow: 'hidden', borderWidth: 1, borderColor: '#1a1a30', position: 'relative' },
-  camera: { flex: 1 },
-  cameraOverlay: { ...StyleSheet.absoluteFill, alignItems: 'center', justifyContent: 'center' },
-  scanFrame: { width: 180, height: 180, position: 'relative' },
-  scanCorner: { position: 'absolute', width: 22, height: 22, borderColor: '#5b5bd6' },
+  cameraContainer: {
+    height: 280,
+    borderRadius: 18,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: '#1a1a30',
+    position: 'relative',
+  },
+  cameraLoading: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    backgroundColor: '#080814',
+  },
+  cameraLoadingText: { color: '#445', fontSize: 13 },
+  cameraOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  // Pulsing scan frame — replaces static scanFrame
+  scanFrame: {
+    width: 190,
+    height: 190,
+    position: 'relative',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    paddingBottom: 10,
+  },
+  scanCorner: { position: 'absolute', width: 24, height: 24, borderColor: '#5b5bd6' },
   scanTL: { top: 0, left: 0, borderTopWidth: 3, borderLeftWidth: 3, borderTopLeftRadius: 4 },
   scanTR: { top: 0, right: 0, borderTopWidth: 3, borderRightWidth: 3, borderTopRightRadius: 4 },
   scanBL: { bottom: 0, left: 0, borderBottomWidth: 3, borderLeftWidth: 3, borderBottomLeftRadius: 4 },
   scanBR: { bottom: 0, right: 0, borderBottomWidth: 3, borderRightWidth: 3, borderBottomRightRadius: 4 },
+  scanFrameHint: { color: 'rgba(255,255,255,0.55)', fontSize: 12 },
+
+  // Torch chip (top-right overlay)
+  torchBtnWrap: { position: 'absolute', top: 12, right: 12 },
+  torchChip: {
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    paddingHorizontal: 11,
+    paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  torchChipText: { color: '#fff', fontSize: 12 },
+
   scanError: { color: '#e53935', fontSize: 12, textAlign: 'center' },
   scanningRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
   scanningText: { color: '#7c7cf0', fontSize: 12 },
@@ -1051,7 +1258,7 @@ const r = StyleSheet.create({
   ctrlStatusErr: { backgroundColor: 'rgba(229,57,53,0.06)', borderColor: 'rgba(229,57,53,0.2)' },
   ctrlStatusText: { color: '#889', fontSize: 12 },
 
-  // NEW: manual retry button inside status bar
+  // Manual retry button
   retryBtn: { paddingVertical: 5, paddingHorizontal: 14, backgroundColor: 'rgba(91,91,214,0.2)', borderRadius: 100, borderWidth: 1, borderColor: '#5b5bd6', marginLeft: 8 },
   retryBtnText: { color: '#9090d0', fontSize: 12, fontWeight: '600' },
 

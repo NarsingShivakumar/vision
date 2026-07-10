@@ -192,7 +192,7 @@ function isInFigure(dotX, dotY, digits) {
   const GW = 10, GH = 13, GAP = 5;
   const n = digits.length;
   const totalCols = n * GW + (n - 1) * GAP;
-  const maxW = n === 1 ? 100 : 155; 
+  const maxW = n === 1 ? 100 : 155;
   const maxH = 110;
   const scale = Math.min(maxW / totalCols, maxH / GH);
   const totalW = totalCols * scale;
@@ -280,6 +280,7 @@ export const ISHIHARA_PLATES = [
 ];
 
 export const TOTAL_PLATES = ISHIHARA_PLATES.length;
+const DOT_CACHE = new Map();
 
 // ── Dot generation ────────────────────────────────────────────────────────────
 /**
@@ -288,6 +289,10 @@ export const TOTAL_PLATES = ISHIHARA_PLATES.length;
  * @returns {Array<{ cx: number, cy: number, r: number, fill: string }>}
  */
 export function generatePlateDots(plate) {
+  if (!plate) return [];
+  if (DOT_CACHE.has(plate.plateNum)) {
+    return DOT_CACHE.get(plate.plateNum);
+  }
   const rng = makePrng(plate.seed);
   const CX = 100, CY = 100, R = 92;
   const dots = [];
@@ -363,7 +368,7 @@ export function generatePlateDots(plate) {
 
   tryPlace(true, 18000);
   tryPlace(false, 18000);
-
+  DOT_CACHE.set(plate.plateNum, dots);
 
   return dots;
 }
@@ -373,4 +378,17 @@ export function getPlate(index) {
   return ISHIHARA_PLATES[
     ((index % ISHIHARA_PLATES.length) + ISHIHARA_PLATES.length) % ISHIHARA_PLATES.length
   ];
+}
+
+/**
+ * Preload all Ishihara plates in the background.
+ * Staggered with timeouts to prevent locking the JS thread.
+ */
+export function preloadIshiharaPlates() {
+  ISHIHARA_PLATES.forEach((plate, index) => {
+    setTimeout(() => {
+      // generatePlateDots handles its own caching via DOT_CACHE
+      generatePlateDots(plate);
+    }, index * 250); // 250ms gap between each plate calculation
+  });
 }

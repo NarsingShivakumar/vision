@@ -15,7 +15,7 @@ const PING_INTERVAL = 3000;   // ms between host pings
 const PONG_TIMEOUT = 8000;   // ms before host marks peer dead
 const RECONNECT_BASE = 1500;   // ms base reconnect delay (controller)
 const RECONNECT_MAX = 16000;  // ms max reconnect delay
-const MAX_RECONNECT = 20;     // give up after N attempts  (0 = infinite)
+const MAX_RECONNECT = 3;     // give up after N attempts  (0 = infinite)
 const TCP_PORT = 54321;  // default port — must be open on host device
 
 // ─── Roles ────────────────────────────────────────────────────────────────────
@@ -207,7 +207,7 @@ class LocalPeerService {
     this.socket = null;
     this.server = null;
     this.connected = false;
-    this.listeners = {};
+    // this.listeners = {};
     console.log('[LocalPeer] Destroyed');
   }
 
@@ -218,16 +218,30 @@ class LocalPeerService {
   doConnect() {
     if (this.destroyed) return;
     const opts = { port: this.port, host: this.hostIp, tls: false };
+
+    let connectionTimeout = null;
+
     const socket = TcpSocket.createConnection(opts, () => {
+      if (connectionTimeout) clearTimeout(connectionTimeout);
       console.log('[LocalPeer] Connected to host', this.hostIp);
       this.reconnectCount = 0;
       this.reconnectDelay = RECONNECT_BASE;
       this.connected = true;
       this.emit('connected', { role: PEER_ROLE.HOST, address: this.hostIp });
-      this.attachSocket(socket);
     });
-  }
 
+    // FIX: Attach socket immediately so errors during connection are caught!
+    this.attachSocket(socket);
+
+    // FIX: 5-second timeout to prevent infinite hanging on unreachable networks
+    connectionTimeout = setTimeout(() => {
+      if (!this.connected && !this.destroyed) {
+        console.warn('[LocalPeer] Connection timed out');
+        socket.destroy();
+        this.emit('error', { message: '⚠ Host unreachable. Please Try again' });
+      }
+    }, 5000);
+  }
   attachSocket(socket) {
     // Destroy previous socket cleanly
     if (this.socket && this.socket !== socket) {
@@ -244,7 +258,11 @@ class LocalPeerService {
 
     socket.on('error', (err) => {
       console.warn('[LocalPeer] Socket error:', err.message);
-      this.emit('error', { message: err.message });
+      // FIX: Output custom error if it errors out before connecting
+      const msg = !this.connected
+        ? '⚠ Cannot reach the host. It may be stopped or the IP is incorrect.'
+        : err.message;
+      this.emit('error', { message: msg });
     });
 
     socket.on('close', () => {
