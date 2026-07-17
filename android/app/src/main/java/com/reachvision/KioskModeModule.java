@@ -1,10 +1,6 @@
 package com.reachvision;
 
 import android.app.Activity;
-import android.widget.Toast;
-
-import androidx.annotation.NonNull;
-import android.app.Activity;
 import android.app.ActivityManager;
 import android.content.Context;
 import android.widget.Toast;
@@ -19,11 +15,10 @@ import com.facebook.react.bridge.ReactMethod;
 public class KioskModeModule extends ReactContextBaseJavaModule {
     private static ReactApplicationContext reactApplicationContext;
 
-    public  KioskModeModule(ReactApplicationContext context){
+    public KioskModeModule(ReactApplicationContext context){
         super(context);
-        reactApplicationContext=context;
+        reactApplicationContext = context;
     }
-
 
     @NonNull
     @Override
@@ -33,17 +28,30 @@ public class KioskModeModule extends ReactContextBaseJavaModule {
 
     @ReactMethod
     public void startKioskMode(){
-        Activity activity=getCurrentActivity();
+        Activity activity = getCurrentActivity();
 
-        activity.startLockTask();
-        // Toast.makeText(activity,"Kiosk mode enabled",Toast.LENGTH_SHORT).show();
+        // Null check added here to prevent background crash
+        if (activity != null) {
+            try {
+                activity.startLockTask();
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
     }
 
     @ReactMethod
     public void stopKioskMode(){
-        Activity activity=getCurrentActivity();
-        activity.stopLockTask();
-        // Toast.makeText(activity,"Kiosk Mode disabled",Toast.LENGTH_SHORT).show();
+        Activity activity = getCurrentActivity();
+
+        // Null check added here to prevent background crash
+        if (activity != null) {
+            try {
+                activity.stopLockTask();
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
     }
 
     @ReactMethod
@@ -58,6 +66,9 @@ public class KioskModeModule extends ReactContextBaseJavaModule {
                     lockTaskMode == ActivityManager.LOCK_TASK_MODE_PINNED);
 
             callback.invoke(isKioskMode);
+        } else {
+            // Safe fallback if activity is null when this is checked
+            callback.invoke(false);
         }
     }
 }

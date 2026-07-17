@@ -1,7 +1,7 @@
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-export const backendURL = 'http://192.168.0.57:8200/reach/';//Ahki? 
+// export const backendURL = 'http://192.168.0.57:8200/reach/';//Ahki? 
 //  export const backendURL = 'https://reachaimedtech.com/reach_ai_newbe/';//new? 
 
 //  export const backendURL = 'https://reachaimedtech.com/reach_campbe/';  
@@ -13,7 +13,7 @@ export const backendURL = 'http://192.168.0.57:8200/reach/';//Ahki?
 //  export const backendURL ='https://reachlife24.in/reach_camp_sskactbe/';
 //  export const backendURL = 'https://reachaimedtech.com/reach_camp_anthargangebe/';
 
-//  export const backendURL = 'https://reachaimedtech.com/reach_camptestbe/';
+ export const backendURL = 'https://reachaimedtech.com/reach_camptestbe/';
 // export const backendURL = 'http://192.168.0.57:8200/reach/';//Ahki
 //  export const backendURL = 'http://192.168.0.136:8200/reach/';//Prudvi
 // export const backendURL = 'http://192.168.0.57:8200/reach/';//naredra

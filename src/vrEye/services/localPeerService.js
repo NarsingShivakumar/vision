@@ -9,7 +9,7 @@
  */
 
 import TcpSocket from 'react-native-tcp-socket';
-
+import NetInfo from '@react-native-community/netinfo';
 // ─── Constants ────────────────────────────────────────────────────────────────
 const PING_INTERVAL = 3000;   // ms between host pings
 const PONG_TIMEOUT = 8000;   // ms before host marks peer dead
@@ -48,7 +48,64 @@ class LocalPeerService {
       role: null,
     };
     this.serverStartedOnce = false;
+    this.reconnectTimeout = null;
+    // Listen for network changes to actively force ICE restarts when moving between WiFi/4G
+    NetInfo.addEventListener(state => {
+      if (!state.isConnected) {
+        this.emit('network_warning', { warning: true });
+      } else {
+        this.emit('network_warning', { warning: false });
+        if (this.peerConnection && this.peerConnection.iceConnectionState === 'disconnected') {
+          this.forceIceRestart();
+        }
+      }
+    });
   }
+
+  setupPeerConnection(peerConnection) {
+    peerConnection.addEventListener('iceconnectionstatechange', () => {
+      const state = peerConnection.iceConnectionState;
+      console.log('[WebRTC] ICE State Changed:', state);
+
+      if (state === 'disconnected') {
+        this.emit('reconnecting', { attempt: 1 });
+        this.reconnectTimeout = setTimeout(() => {
+          this.emit('reconnectfailed', { message: 'Connection timed out.' });
+          this.destroy(); // Give up after 20 seconds
+        }, 20000);
+      }
+      else if (state === 'failed') {
+        // ACTIVE RECOVERY: Force an ICE restart
+        this.forceIceRestart();
+      }
+      else if (state === 'connected' || state === 'completed') {
+        if (this.reconnectTimeout) {
+          clearTimeout(this.reconnectTimeout);
+          this.reconnectTimeout = null;
+        }
+        this.emit('connected'); // Hides the reconnecting spinner
+      }
+    });
+  }
+
+  // The new active recovery method
+  async forceIceRestart() {
+    if (!this.peerConnection || this.peerConnection.signalingState !== 'stable') return;
+    try {
+      console.log('[WebRTC] Forcing ICE Restart...');
+      const offer = await this.peerConnection.createOffer({ iceRestart: true });
+      await this.peerConnection.setLocalDescription(offer);
+
+      // Emit the new offer via your socket to the other device
+      if (this.socket) {
+        this.socket.emit('offer', { type: 'offer', sdp: offer, room: this.roomCode });
+      }
+    } catch (e) {
+      console.error('[WebRTC] ICE Restart failed', e);
+      this.emit('reconnectfailed', { message: 'Failed to negotiate new connection.' });
+    }
+  }
+
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Public API

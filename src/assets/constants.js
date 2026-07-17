@@ -19,7 +19,7 @@ export const isForMobile = false;
 export const isForCamp = true;
 // export const imageServerUrl = backendURL + 'projectsimages/';
 // export const socketURI= 'https://socket.reachlife24.com';
-// export const socketURI = 'https://camptestsocket.reachaimedtech.com/';
+export const socketURI = 'https://camptestsocket.reachaimedtech.com/';
 // export const socketURI ='https://meddybuddyprod.reachlife24.in';
 // export const socketURI ='https://reachcampavishkar.reachlife24.in/';
 // export const socketURI= 'https://reachaisocket.reachaimedtech.com/';
@@ -37,7 +37,7 @@ export const isForCamp = true;
 // export const socketURI ='https://prodsocket.reachlife24.com/';
 // export const socketURI ='https://medibuddy.reachlife24.com/';
 // export const socketURI = 'https://campsocket.reachaimedtech.com/';
-export const socketURI = 'http://192.168.0.57:8000/';
+// export const socketURI = 'http://192.168.0.57:8000/';
 // export const socketURI = 'http://10.226.54.246:8000/';
 
 export const iceServers = {

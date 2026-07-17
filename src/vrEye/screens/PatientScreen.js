@@ -440,8 +440,28 @@ export default function PatientScreen({ route, navigation }) {
       localPeerService.destroy();
       navigation.replace('RoleAndConnectScreen');
     }));
+    //  host_logout — controller operator clicked logout ─────────────
+    P.push(localPeerService.on('auth_logout', async () => {
+      console.log('[PatientScreen] auth_logout received — clearing credentials');
+      try {
+        await AsyncStorage.removeItem('isFirstTimeLaunch');
+        await AsyncStorage.removeItem('kioskId');
+        await AsyncStorage.removeItem('loginResponseEntityToken');
+        await AsyncStorage.removeItem('loginInfo');
+        await AsyncStorage.removeItem('isLoggedIn');
+        await AsyncStorage.removeItem('doctorId');
+      } catch (e) {
+        console.error('[PatientScreen] Error clearing credentials on logout:', e);
+      }
 
-    // ── NEW: auth_sync — controller sends credentials after login ─────────────
+      // Disconnect everything and kick back to the connection screen
+      // socketService.disconnect();
+      // webRTCService.disconnect();
+      // localPeerService.destroy();
+      // navigation.replace('RoleAndConnectScreen');
+    }));
+
+    //  auth_sync — controller sends credentials after login ─────────────
     // Persists the same AsyncStorage keys that KioskSetupScreen + Login.js write
     // so the HOST device is fully authenticated without requiring its own login.
     P.push(localPeerService.on('auth_sync', async (data) => {

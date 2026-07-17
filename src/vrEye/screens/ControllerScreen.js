@@ -1,16 +1,5 @@
 /**
- * ControllerScreen.js v5.4 — Kiosk Pin During Test
- *
- * Changes from v5.3:
- * - ADD: testInProgress state — true only while a test is actually running
- *        (from startTest() until result is ready / session ends / disconnect).
- * - ADD: CustomHeader (app-pin toggle) rendered ONLY on the monitoring view,
- *        i.e. only while a test is in progress. Does not appear on any other
- *        screen (connecting / auth / registration / ready / result), so the
- *        existing UI on those screens is unaffected.
- * - FIX: stale-lock-clear effect moved from inside AssistantDisconnectedModal
- *        (wrong location — was a per-modal-mount effect) to the top level of
- *        ControllerScreen, where it belongs (runs once when the screen mounts).
+ * ControllerScreen.js v5.7 — Reconnection Strategy & Network Warnings
  */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
@@ -20,33 +9,43 @@ import {
   KeyboardAvoidingView, Platform, Dimensions, Modal, Animated,
   Image,
   Keyboard,
+  FlatList,
+  Alert,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { useForm, Controller } from 'react-hook-form';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Snackbar } from 'react-native-snackbar';
 
 // showSnack — lazy require so native Snackbar module is resolved AFTER bridge init.
-const showSnack = (text, bgColor = red) => {
+const showSnack = (text, backgroundColor = '#D32F2F') => {
+  const message = String(text || 'Something went wrong.');
+
   try {
-    const mod = require('react-native-snackbar');
-    const S = mod?.default ?? mod;
-    S.show({ text, duration: S.LENGTH_LONG ?? 2750, backgroundColor: bgColor });
-  } catch (e) {
-    console.warn('[showSnack] failed:', e?.message, '|', text);
+    Snackbar.show({
+      text: message,
+      duration: Snackbar.LENGTH_LONG,
+      backgroundColor,
+    });
+  } catch (error) {
+    console.warn('[showSnack] failed:', error?.message, '|', message);
+
+    // Fallback so the user still sees the message.
+    Alert.alert('', message);
   }
 };
 
 import localPeerService from '../services/localPeerService';
-import socketService from '../services/socketService'; // Added socketService
+import socketService from '../services/socketService';
 import WifiGuard from '../components/WifiGuard';
 import { useWifiGuard } from '../hooks/useWifiGuard';
 import EyePanel from '../components/EyePanel';
 import { generatePlateDots, getPlate, TOTAL_PLATES, preloadIshiharaPlates } from '../utils/ishiharaPanel';
 import apiService from '../../api/AxiosClient';
 import { fetchActiveAssistantsApi, reassignAssistantApi, submitRegistrationApi, getDepartments, getDesignations, sendEmployeeDetailsList } from '../../api/ApiService';
-import { useDispatch } from 'react-redux';
+import { useDispatch, useSelector } from 'react-redux';
 import { fetchResultData } from '../../store/slices/resultSlice';
-import { sendPatientDetailsList } from '../../api/ApiService';
+import { aiRegisteredPatient, clearAiRegisteredPatientData } from '../../store/slices/AiPatientRegisteredSlice';
 import VisionResultView from '../components/VisionResultView';
 import { LANGUAGE_OPTIONS } from '../../assets/constants';
 import { appColor, red } from '../../assets/colors';
@@ -76,12 +75,6 @@ const { width: W } = Dimensions.get('window');
 const EYE_W = Math.floor((W - 38) / 2);
 const EYE_H = Math.round(EYE_W * (4 / 3));
 
-// Fixed reference size (px) for the acuity-phase letter shown in this
-// screen's small monitoring preview. Always constant, regardless of the
-// real calibrated optotype.sizeLevel driving the patient/VR headset — this
-// is what stops the letter from growing large enough to clip/disappear in
-// the small preview box. Clamped inside OptotypeTest against the preview
-// disc size, so it can never overflow.
 const CONTROLLER_PREVIEW_LETTER_SIZE = 64;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -134,7 +127,7 @@ function AssistantDisconnectedModal({ visible, roomCode, patientName, onReassign
       if (countdownRef.current) { clearInterval(countdownRef.current); countdownRef.current = null; }
       if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
     };
-  }, [visible]); // eslint-disable-line
+  }, [visible]);
 
   async function fetchAssistantsModal() {
     setLoadingAssistants(true);
@@ -280,6 +273,7 @@ function InlineKioskSetup({ onDone }) {
         'api/v1/twelvelead/ecg/kiosk/check',
         { params: { kioskId: kioskId.trim() } }
       );
+      console.log("handleRegister::", response)
       const setupFlag = response?.data?.response?.setupFlag;
       const message = response?.data?.message;
       if (setupFlag === true) {
@@ -477,12 +471,24 @@ export default function ControllerScreen({ route, navigation }) {
   const [peerRtt, setPeerRtt] = useState(null);
   const [peerReconnecting, setPeerReconnecting] = useState(false);
   const [reconnectFailed, setReconnectFailed] = useState(false);
+  const [networkWarning, setNetworkWarning] = useState(false); // <--- NEW: Tracks network drops
 
   // ── Kiosk pin state — true ONLY while a test is actually in progress.
-  // Drives whether CustomHeader (the app-pin toggle) is shown at all.
   const [testInProgress, setTestInProgress] = useState(false);
 
-  const [regStep, setRegStep] = useState('details');
+  // Starts at 'home' instead of 'details' to render HomePage2 equivalent first
+  const [regStep, setRegStep] = useState('home');
+  const [isExistingPatient, setIsExistingPatient] = useState(false);
+
+  const [profileData, setProfileData] = useState({
+    name: '',
+    username: '',
+    employeeId: '',
+    mobileNumber: '',
+    designationName: '',
+    kioskId: ''
+  });
+
   const {
     control,
     handleSubmit,
@@ -511,6 +517,12 @@ export default function ControllerScreen({ route, navigation }) {
 
   const dispatch = useDispatch();
 
+  // ── Search State (Redux) ───────────────────────────────────────────────────
+  const [searchQuery, setSearchQuery] = useState('');
+  const searchResults = useSelector(state => state.aiRegisteredPatient?.aiRegisteredPatientData || []);
+  const isSearching = useSelector(state => state.aiRegisteredPatient?.isLoading || false);
+  const searchError = useSelector(state => state.aiRegisteredPatient?.isError || false);
+
   const [roomCode, setRoomCode] = useState('');
   const [patientName, setPatientName] = useState('');
   const [vrState, setVrState] = useState({
@@ -523,9 +535,11 @@ export default function ControllerScreen({ route, navigation }) {
     plateIndex: 0, nearOptotype: null,
     isLensCheck: false, lensCheckEye: 'both',
   });
+
   const plateDots = React.useMemo(() => {
     return vrState.phase === 'color' ? generatePlateDots(getPlate(vrState.plateIndex) ?? 0) : [];
   }, [vrState.phase, vrState.plateIndex]);
+
   const [assistantDisconnected, setAssistantDisconnected] = useState(false);
   const [hasAssistantJoined, setHasAssistantJoined] = useState(false);
   const [resultReady, setResultReady] = useState(false);
@@ -548,10 +562,7 @@ export default function ControllerScreen({ route, navigation }) {
     if (!localPeerService.isConnected()) localPeerService.manualReconnect();
   }, []);
 
-  // ── Kiosk safety net ──────────────────────────────────────────────────────
-  // Runs once when ControllerScreen mounts. If a previous session crashed or
-  // was force-killed while pinned, this clears the stale lock so the operator
-  // never opens the app into an already-locked, unrecoverable state.
+  // ── Kiosk safety net & preload ────────────────────────────────────────────
   useEffect(() => {
     isKioskModeEnabled().then((enabled) => {
       if (enabled) stopKioskMode();
@@ -560,28 +571,74 @@ export default function ControllerScreen({ route, navigation }) {
   }, []);
 
   // ── Auth check ───────────────────────────────────────────────────────────
-  const runAuthCheck = useCallback(async () => {
+  const runAuthCheck = useCallback(() => {
     if (authCheckInProgress.current) return;
     authCheckInProgress.current = true;
     setAuthState('checking');
-    try {
-      const isFirstTimeLaunch = await AsyncStorage.getItem('isFirstTimeLaunch');
-      if (isFirstTimeLaunch === null) { setAuthState('kiosk_setup'); return; }
-      const isLoggedIn = await AsyncStorage.getItem('isLoggedIn');
-      if (isLoggedIn !== '1') { setAuthState('login'); return; }
-      setAuthState('ready');
-    } catch (e) {
-      console.error('[ControllerScreen] auth check error:', e);
-      setAuthState('kiosk_setup');
-    } finally {
-      authCheckInProgress.current = false;
-    }
+    setTimeout(async () => {
+      try {
+        const checkStorage = async () => {
+          const isFirstTimeLaunch = await AsyncStorage.getItem('isFirstTimeLaunch');
+          if (isFirstTimeLaunch === null) return 'kiosk_setup';
+          const isLoggedIn = await AsyncStorage.getItem('isLoggedIn');
+          if (isLoggedIn !== '1') return 'login';
+          return 'ready';
+        };
+
+        const timeout = new Promise((resolve) => setTimeout(() => resolve('kiosk_setup'), 3000));
+        const finalState = await Promise.race([checkStorage(), timeout]);
+        setAuthState(finalState);
+      } catch (e) {
+        console.error('[ControllerScreen] auth check error:', e);
+        setAuthState('kiosk_setup');
+      } finally {
+        authCheckInProgress.current = false;
+      }
+    }, 150);
   }, []);
+
+  // ── Redux Search Handlers ─────────────────────────────────────────────────
+  const handleSearch = useCallback(async () => {
+    if (!searchQuery.trim()) {
+      showSnack('Please enter a name or ID to search.');
+      return;
+    }
+
+    dispatch(clearAiRegisteredPatientData());
+    dispatch(aiRegisteredPatient({
+      searchValue: searchQuery.trim(),
+      isForAllPatients: false
+    }));
+  }, [searchQuery, dispatch]);
+
+  const selectPatient = useCallback((patient) => {
+    resetForm({ name: '', age: '', mobile: '', gender: '' });
+    const pid = patient.employeeId || patient.patientId;
+
+    let calcAge = '';
+    if (patient.dateOfBirth) {
+      const birthYear = new Date(patient.dateOfBirth).getFullYear();
+      const currentYear = new Date().getFullYear();
+      calcAge = String(currentYear - birthYear);
+    }
+
+    resetForm({
+      name: patient.name || patient.firstName || '',
+      age: calcAge,
+      mobile: patient.mobileNumber || patient.contactNumber || '',
+      gender: patient.gender ? (patient.gender.toLowerCase() === 'male' ? 'Male' : patient.gender.toLowerCase() === 'female' ? 'Female' : 'Others') : ''
+    });
+
+    setPatientRegistrationId(pid);
+    setIsExistingPatient(true);
+    setRegStep('extra_details');
+  }, [resetForm]);
 
   const onKioskSetupDone = useCallback(() => {
     Keyboard.dismiss();
     setTimeout(() => setAuthState('login'), 200);
   }, []);
+
   const onLoginDone = useCallback(async (loginData, kioskId) => {
     localPeerService.send('auth_sync', {
       kioskId,
@@ -592,35 +649,69 @@ export default function ControllerScreen({ route, navigation }) {
     setTimeout(() => setAuthState('ready'), 200);
   }, []);
 
+  // ── Load Profile Data for HomePage2 ───────────────────────────────────────
+  useEffect(() => {
+    if (authState === 'ready') {
+      const fetchProfile = async () => {
+        try {
+          const loginInfoStr = await AsyncStorage.getItem('loginInfo');
+          const kioskId = await AsyncStorage.getItem('kioskId');
+
+          if (loginInfoStr) {
+            const parsed = JSON.parse(loginInfoStr);
+            const resp = parsed?.response || {};
+            const ulb = resp.ulbList?.[0] || {};
+
+            setProfileData({
+              name: resp.name || '',
+              username: resp.username || '',
+              employeeId: ulb.employeeId || '',
+              mobileNumber: resp.mobileNumber || '',
+              designationName: ulb.designationName || '',
+              kioskId: kioskId || ''
+            });
+          }
+        } catch (e) {
+          console.warn('[ControllerScreen] Error loading profile data:', e);
+        }
+      };
+
+      fetchProfile();
+    }
+  }, [authState]);
+
+  const handleLogout = useCallback(async () => {
+    localPeerService.send('auth_logout', {});
+    await AsyncStorage.removeItem('isFirstTimeLaunch');
+    await AsyncStorage.removeItem('kioskId');
+    await AsyncStorage.removeItem('loginInfo');
+    await AsyncStorage.removeItem('isLoggedIn');
+    await AsyncStorage.removeItem('loginResponseEntityToken');
+    await AsyncStorage.removeItem('doctorId');
+    setAuthState('kiosk_setup');
+    setRegStep('home');
+  }, []);
+
   // ── Call Declined Listener ─────────────────────────────────────────────────
   useEffect(() => {
     const unsub = localPeerService.on('call_declined', (data) => {
-      console.log('[ControllerScreen] call_declined received', data);
-
-      if (data?.roomCode && roomCode && data.roomCode !== roomCode) {
-        console.log(
-          '[ControllerScreen] call_declined ignored — roomCode mismatch',
-          '| event:', data.roomCode, '| current:', roomCode,
-        );
-        return;
-      }
-
+      if (data?.roomCode && roomCode && data.roomCode !== roomCode) return;
       clearAssistantJoinTimeout();
-
       setAssistantDisconnected(false);
       setView('registration');
       setRegStep('assistant');
-      setSubmitError(
-        data?.message ?? 'The assistant declined the call. Please select another assistant.'
-      );
+      setSubmitError(data?.message ?? 'The assistant declined the call. Please select another assistant.');
     });
-
     return () => unsub();
   }, [roomCode, clearAssistantJoinTimeout]);
 
   // ── Peer listeners ────────────────────────────────────────────────────────
   useEffect(() => {
     const U = unsubs.current;
+
+    U.push(localPeerService.on('network_warning', (data) => { // <--- NEW: Listener for Network Unstable
+      setNetworkWarning(data.warning);
+    }));
 
     U.push(localPeerService.on('connected', () => {
       setPeerConnected(true);
@@ -680,7 +771,6 @@ export default function ControllerScreen({ route, navigation }) {
     if (localPeerService.isConnected()) { setPeerConnected(true); runAuthCheck(); }
     fetchAssistants();
 
-    // Ensure the socket is connected to receive events like 'call_declined'
     socketService.connect('controller');
 
     Promise.allSettled([
@@ -700,7 +790,8 @@ export default function ControllerScreen({ route, navigation }) {
     clearAssistantJoinTimeout();
     setView('registration');
     setRoomCode('');
-    setRegStep('details');
+    setRegStep('home');
+    setIsExistingPatient(false);
     setSelectedAssistantId('');
     setHasAssistantJoined(false);
     setSubmitError('');
@@ -744,62 +835,75 @@ export default function ControllerScreen({ route, navigation }) {
     return () => { if (pollInterval) clearInterval(pollInterval); };
   }, [view, regStep, fetchAssistants]);
 
-  const goToAssistantStep = useCallback(
-    handleSubmit(async (formValues) => {
-      setRegisteringPatient(true);
-      setSubmitError('');
-      try {
-        const ageNum = formValues.age ? Number(formValues.age) : null;
-        let dateOfBirth = null;
-        if (ageNum && ageNum > 0) {
-          const birthYear = new Date().getFullYear() - ageNum;
-          dateOfBirth = new Date(`${birthYear}-01-01`).getTime();
-        }
+  // We separate the logic from handleSubmit so we can call it manually for existing patients
+  const proceedToAssistant = async (formValues) => {
+    setSubmitError('');
 
-        const defaultDeptId = departments?.length > 0 ? String(departments[0].id) : null;
-        const defaultDesignId = designations?.length > 0 ? Number(designations[0].id) : null;
-        const userData = {
-          name: formValues.name.trim(),
-          mobileNumber: formValues.mobile.trim(),
-          gender: formValues.gender,
-          employeeId: null,
-          dateOfBirth: dateOfBirth,
-          photoPath: null,
-          departmentId: defaultDeptId,
-          designationId: defaultDesignId,
-          mobileEmployeeRegistration: true,
-        };
+    if (isExistingPatient && patientRegistrationId) {
+      fetchAssistants();
+      setRegStep('assistant');
+      return;
+    }
 
-        const responseData = await sendEmployeeDetailsList(userData);
-
-        if (!responseData) {
-          setSubmitError('Patient registration failed. Please try again.');
-          return;
-        }
-
-        const registeredId =
-          responseData?.response?.employeeId ??
-          responseData?.response?.patientId ??
-          responseData?.response?.id ??
-          null;
-        setPatientRegistrationId(registeredId);
-
-        fetchAssistants();
-        setRegStep('assistant');
-
-      } catch (e) {
-        const axiosErr = e?.error ?? e;
-        const status = axiosErr?.response?.status;
-        const serverMsg = axiosErr?.response?.data?.message ?? axiosErr?.response?.data?.error;
-        const fallback = axiosErr?.message ?? 'Patient registration failed. Please try again.';
-        const userMsg = serverMsg ?? fallback;
-        setSubmitError('Assistant is busy. Please select another.');
-      } finally {
-        setRegisteringPatient(false);
+    setRegisteringPatient(true);
+    try {
+      const ageNum = formValues.age ? Number(formValues.age) : null;
+      let dateOfBirth = null;
+      if (ageNum && ageNum > 0) {
+        const birthYear = new Date().getFullYear() - ageNum;
+        dateOfBirth = new Date(`${birthYear}-01-01`).getTime();
       }
-    }),
-    [handleSubmit, fetchAssistants, departments, designations],
-  );
+
+      const defaultDeptId = departments?.length > 0 ? String(departments[0].id) : null;
+      const defaultDesignId = designations?.length > 0 ? Number(designations[0].id) : null;
+      const userData = {
+        name: formValues.name.trim(),
+        mobileNumber: formValues.mobile.trim(),
+        gender: formValues.gender,
+        employeeId: null,
+        dateOfBirth: dateOfBirth,
+        photoPath: null,
+        departmentId: defaultDeptId,
+        designationId: defaultDesignId,
+        mobileEmployeeRegistration: true,
+      };
+
+      const responseData = await sendEmployeeDetailsList(userData);
+
+      if (!responseData) {
+        setSubmitError('Patient registration failed. Please try again.');
+        return;
+      }
+
+      const registeredId =
+        responseData?.response?.employeeId ??
+        responseData?.response?.patientId ??
+        responseData?.response?.id ??
+        null;
+      setPatientRegistrationId(registeredId);
+
+      fetchAssistants();
+      setRegStep('assistant');
+
+    } catch (e) {
+      const axiosErr = e?.error ?? e;
+      const status = axiosErr?.response?.status;
+      const serverMsg = axiosErr?.response?.data?.message ?? axiosErr?.response?.data?.error;
+      const fallback = axiosErr?.message ?? 'Patient registration failed. Please try again.';
+      const userMsg = serverMsg ?? fallback;
+      setSubmitError('Assistant is busy. Please select another.');
+    } finally {
+      setRegisteringPatient(false);
+    }
+  };
+
+  const goToAssistantStep = () => {
+    if (isExistingPatient) {
+      proceedToAssistant(getValues());
+    } else {
+      handleSubmit(proceedToAssistant)();
+    }
+  };
 
   const submitRegistration = useCallback(async () => {
     if (!selectedAssistantId || submitting) return;
@@ -843,7 +947,6 @@ export default function ControllerScreen({ route, navigation }) {
       setSubmitError(err?.response?.data?.message ?? err?.message ?? 'Could not start session.');
     } finally {
       setSubmitting(false);
-
     }
   }, [
     selectedAssistantId, submitting, getValues,
@@ -891,6 +994,14 @@ export default function ControllerScreen({ route, navigation }) {
       <SafeAreaProvider>
         <SafeAreaView style={styles.root}>
           <WifiGuard onRestore={handleWifiRestore} />
+
+          {/* <--- NEW: NETWORK WARNING BANNER ---> */}
+          {networkWarning && (
+            <View style={sv.networkStatusContainer}>
+              <Text style={sv.unstableConnectionText}>⚠ Unstable Network Connection</Text>
+            </View>
+          )}
+
           <StatusBar barStyle="light-content" backgroundColor="#080820" />
           <View style={styles.centeredCard}>
             {reconnectFailed ? (
@@ -936,6 +1047,13 @@ export default function ControllerScreen({ route, navigation }) {
       <SafeAreaProvider>
         <SafeAreaView style={styles.root}>
           <WifiGuard onRestore={handleWifiRestore} />
+
+          {networkWarning && (
+            <View style={sv.networkStatusContainer}>
+              <Text style={sv.unstableConnectionText}>⚠ Unstable Network Connection</Text>
+            </View>
+          )}
+
           <StatusBar barStyle="light-content" backgroundColor="#080820" />
           <PeerStatusBar connected={peerConnected} rtt={peerRtt}
             reconnecting={peerReconnecting} reconnectFailed={reconnectFailed}
@@ -954,13 +1072,20 @@ export default function ControllerScreen({ route, navigation }) {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // RENDER B: Registration
+  // RENDER B: Registration (Home -> Form -> Assistant)
   // ═══════════════════════════════════════════════════════════════════════════
   if (view === 'registration') {
     return (
       <SafeAreaProvider>
         <SafeAreaView style={styles.root}>
           <WifiGuard onRestore={handleWifiRestore} />
+
+          {networkWarning && (
+            <View style={sv.networkStatusContainer}>
+              <Text style={sv.unstableConnectionText}>⚠ Unstable Network Connection</Text>
+            </View>
+          )}
+
           <PeerStatusBar connected={peerConnected} rtt={peerRtt}
             reconnecting={peerReconnecting} reconnectFailed={reconnectFailed}
             onRetry={handleManualReconnect} />
@@ -968,20 +1093,221 @@ export default function ControllerScreen({ route, navigation }) {
             <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
               <View style={styles.card}>
                 <View style={styles.cardHeader}>
-                  <Text style={styles.cardEyebrow}>Controller · Patient Registration</Text>
-                  <Text style={styles.cardTitle}>Patient Registration</Text>
-                  <View style={styles.stepIndicator}>
-                    <StepDot n={1} active={regStep === 'details'} done={regStep === 'assistant'} label="Details" />
-                    <View style={styles.stepLine} />
-                    <StepDot n={2} active={regStep === 'assistant'} done={false} label="Assistant" />
-                  </View>
+                  <Text style={styles.cardEyebrow}>Controller · Dashboard</Text>
+                  <Text style={styles.cardTitle}>{regStep === 'home' ? 'Home' : regStep === 'search' ? 'Search Patient' : 'Patient Registration'}</Text>
+
+                  {(regStep === 'details' || regStep === 'extra_details' || regStep === 'assistant') && (
+                    <View style={styles.stepIndicator}>
+                      <StepDot
+                        n={1}
+                        active={regStep === 'details' || regStep === 'extra_details'}
+                        done={regStep === 'assistant'}
+                        label="Details"
+                      />
+                      <View style={styles.stepLine} />
+                      <StepDot
+                        n={2}
+                        active={regStep === 'assistant'}
+                        done={false}
+                        label="Assistant"
+                      />
+                    </View>
+                  )}
                 </View>
 
                 <View style={styles.formBody}>
 
+                  {/* ── Step 0: HomePage2 Dashboard ── */}
+                  {regStep === 'home' && (
+                    <View style={sv.homeWrapper}>
+
+                      <View style={sv.profileCard}>
+                        <View style={sv.profileHeaderRow}>
+                          <Text style={sv.profileTitle}>Operator Profile</Text>
+                          <TouchableOpacity style={sv.logoutBtn} onPress={handleLogout}>
+                            <Text style={sv.logoutBtnText}>Logout</Text>
+                          </TouchableOpacity>
+                        </View>
+
+                        <View style={sv.profileData}>
+                          <ProfileRow label="Name" value={profileData.name} />
+                          <ProfileRow label="Username" value={profileData.username} />
+                          <ProfileRow label="Mobile Number" value={profileData.mobileNumber} />
+                          <ProfileRow label="Designation" value={profileData.designationName} />
+                          <ProfileRow label="Kiosk ID" value={profileData.kioskId} />
+                        </View>
+                      </View>
+
+                      <Text style={sv.actionPrompt}>What would you like to do?</Text>
+                      <View style={sv.actionRow}>
+                        <TouchableOpacity style={sv.actionBtn} onPress={() => {
+                          setIsExistingPatient(false);
+                          resetForm({ name: '', age: '', mobile: '', gender: '' });
+                          setRegStep('details');
+                        }} activeOpacity={0.85}>
+                          <Text style={sv.actionBtnText}>Register</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity style={[sv.actionBtn, sv.actionBtnGhost]} onPress={() => {
+                          setSearchQuery('');
+                          dispatch(clearAiRegisteredPatientData());
+                          setRegStep('search');
+                        }} activeOpacity={0.85}>
+                          <Text style={sv.actionBtnGhostText}>Registered</Text>
+                        </TouchableOpacity>
+                      </View>
+
+                    </View>
+                  )}
+
+                  {/* ── Step 0.5: Search Registered Patient ── */}
+                  {regStep === 'search' && (
+                    <View style={{ flex: 1, minHeight: 400 }}>
+                      <TouchableOpacity style={styles.back} onPress={() => setRegStep('home')}>
+                        <Text style={styles.backText}>← Back to Home</Text>
+                      </TouchableOpacity>
+
+                      <View style={sv.searchBarRow}>
+                        <TextInput
+                          style={sv.searchInput}
+                          placeholder="Search by name or ID..."
+                          placeholderTextColor="#555"
+                          value={searchQuery}
+                          onChangeText={setSearchQuery}
+                          onSubmitEditing={handleSearch}
+                          returnKeyType="search"
+                        />
+                        <TouchableOpacity
+                          style={sv.searchBtn}
+                          onPress={handleSearch}
+                          disabled={isSearching}
+                        >
+                          {isSearching ? (
+                            <ActivityIndicator size="small" color="#fff" />
+                          ) : (
+                            <Text style={sv.searchBtnText}>Search</Text>
+                          )}
+                        </TouchableOpacity>
+                      </View>
+
+                      <View style={{ flex: 1, marginTop: 16 }}>
+                        {isSearching ? (
+                          <View style={sv.centerMsg}>
+                            <ActivityIndicator size="large" color="#5b5bd6" />
+                            <Text style={sv.msgText}>Searching patients...</Text>
+                          </View>
+                        ) : searchError ? (
+                          <View style={sv.centerMsg}>
+                            <Text style={sv.errorText}>⚠ Search failed. Please try again.</Text>
+                          </View>
+                        ) : searchResults.length === 0 && searchQuery ? (
+                          <View style={sv.centerMsg}>
+                            <Text style={sv.msgText}>No patients found.</Text>
+                          </View>
+                        ) : (
+                          <FlatList
+                            data={searchResults}
+                            keyExtractor={(item) => item.employeeId || item.patientId || Math.random().toString()}
+                            showsVerticalScrollIndicator={false}
+                            contentContainerStyle={{ paddingBottom: 20, gap: 10 }}
+                            renderItem={({ item: p }) => {
+                              const pid = p.employeeId || p.patientId;
+                              return (
+                                <TouchableOpacity
+                                  style={sv.searchResultCard}
+                                  onPress={() => selectPatient(p)}
+                                  activeOpacity={0.7}
+                                >
+                                  <View style={sv.searchResultAvatar}>
+                                    <Text style={sv.searchResultAvatarText}>
+                                      {(p.name || p.firstName || '?').charAt(0).toUpperCase()}
+                                    </Text>
+                                  </View>
+                                  <View style={{ flex: 1, paddingLeft: 12 }}>
+                                    <Text style={sv.searchResultName}>{p.name || p.firstName} {p.lastName || ''}</Text>
+                                    <Text style={sv.searchResultDetails}>ID: {pid}  •  Mobile: {p.mobileNumber || p.contactNumber}</Text>
+                                    <Text style={sv.searchResultDetails}>
+                                      {p.gender} {p.dateOfBirth ? ` • DOB: ${new Date(p.dateOfBirth).toLocaleDateString()}` : ''}
+                                    </Text>
+                                  </View>
+                                  <Text style={{ color: '#5b5bd6', fontSize: 24, paddingHorizontal: 8 }}>›</Text>
+                                </TouchableOpacity>
+                              );
+                            }}
+                          />
+                        )}
+                      </View>
+                    </View>
+                  )}
+
+                  {/* ── Step 1.5: Extra Details (For Existing Patients) ── */}
+                  {regStep === 'extra_details' && (
+                    <>
+                      <TouchableOpacity style={styles.back} onPress={() => setRegStep('search')}>
+                        <Text style={styles.backText}>← Back to Search</Text>
+                      </TouchableOpacity>
+
+                      <View style={styles.field}>
+                        <Text style={styles.label}>Preferred Language</Text>
+                        <View style={styles.genderRow}>
+                          {LANGUAGE_OPTIONS.map((lang) => (
+                            <TouchableOpacity key={lang.value}
+                              style={[styles.genderBtn, regLanguage === lang.value && sv.genderBtnSel]}
+                              onPress={() => setRegLanguage(lang.value)}>
+                              <Text style={[styles.genderText, regLanguage === lang.value && sv.genderTextSel]}>
+                                {lang.label}
+                              </Text>
+                            </TouchableOpacity>
+                          ))}
+                        </View>
+                      </View>
+
+                      <TouchableOpacity style={styles.checkRow} onPress={() => setRegGlasses(v => !v)} activeOpacity={0.7}>
+                        <View style={[styles.checkbox, regGlasses && sv.checkboxOn]}>
+                          {regGlasses && <Text style={styles.checkmark}>✓</Text>}
+                        </View>
+                        <Text style={styles.checkLabel}>Currently wearing glasses / contact lenses</Text>
+                      </TouchableOpacity>
+
+                      <View style={styles.field}>
+                        <Text style={styles.label}>Known Allergies</Text>
+                        <View style={styles.allergyGrid}>
+                          {ALLERGY_OPTIONS.map((a) => (
+                            <TouchableOpacity key={a.key}
+                              style={[styles.chip, regAllergies[a.key] && sv.chipSel]}
+                              onPress={() => setRegAllergies((p) => ({ ...p, [a.key]: !p[a.key] }))}>
+                              <Text style={[styles.chipText, regAllergies[a.key] && sv.chipTextSel]}>{a.label}</Text>
+                            </TouchableOpacity>
+                          ))}
+                        </View>
+                      </View>
+
+                      {submitError ? (
+                        <View style={styles.errorBox}>
+                          <Text style={styles.errorText}>⚠ {submitError}</Text>
+                        </View>
+                      ) : null}
+
+                      <TouchableOpacity
+                        style={[styles.btn, registeringPatient && { opacity: 0.65 }]}
+                        onPress={goToAssistantStep}
+                        disabled={registeringPatient}
+                        activeOpacity={0.85}
+                      >
+                        {registeringPatient
+                          ? <ActivityIndicator color="#fff" />
+                          : <Text style={styles.btnText}>Next — Choose Assistant →</Text>
+                        }
+                      </TouchableOpacity>
+                    </>
+                  )}
+
                   {/* ── Step 1: Details ── */}
                   {regStep === 'details' && (
                     <>
+                      <TouchableOpacity style={styles.back} onPress={() => setRegStep('home')}>
+                        <Text style={styles.backText}>← Back to Home</Text>
+                      </TouchableOpacity>
+
                       <View style={styles.row}>
                         <View style={[styles.field, { flex: 2 }]}>
                           <Text style={styles.label}>Full Name *</Text>
@@ -1131,7 +1457,7 @@ export default function ControllerScreen({ route, navigation }) {
                   {/* ── Step 2: Assistant ── */}
                   {regStep === 'assistant' && (
                     <>
-                      <TouchableOpacity style={styles.back} onPress={resetSession}>
+                      <TouchableOpacity style={styles.back} onPress={() => setRegStep(isExistingPatient ? 'extra_details' : 'details')}>
                         <Text style={styles.backText}>← Back</Text>
                       </TouchableOpacity>
                       <Text style={styles.sectionHeading}>Select Assistant</Text>
@@ -1211,6 +1537,13 @@ export default function ControllerScreen({ route, navigation }) {
       <SafeAreaProvider>
         <SafeAreaView style={[styles.root, { alignItems: 'center', justifyContent: 'center', gap: 20, padding: 32 }]}>
           <WifiGuard onRestore={handleWifiRestore} />
+
+          {networkWarning && (
+            <View style={sv.networkStatusContainer}>
+              <Text style={sv.unstableConnectionText}>⚠ Unstable Network Connection</Text>
+            </View>
+          )}
+
           <PeerStatusBar connected={peerConnected} rtt={peerRtt}
             reconnecting={peerReconnecting} reconnectFailed={reconnectFailed}
             onRetry={handleManualReconnect} />
@@ -1255,6 +1588,13 @@ export default function ControllerScreen({ route, navigation }) {
       <SafeAreaProvider>
         <SafeAreaView style={styles.root}>
           <WifiGuard onRestore={handleWifiRestore} />
+
+          {networkWarning && (
+            <View style={sv.networkStatusContainer}>
+              <Text style={sv.unstableConnectionText}>⚠ Unstable Network Connection</Text>
+            </View>
+          )}
+
           <PeerStatusBar connected={peerConnected} rtt={peerRtt}
             reconnecting={peerReconnecting} reconnectFailed={reconnectFailed}
             onRetry={handleManualReconnect} />
@@ -1300,11 +1640,15 @@ export default function ControllerScreen({ route, navigation }) {
   return (
     <SafeAreaProvider>
       <SafeAreaView style={styles.root}>
-        {/* CustomHeader (app-pin toggle) — visible ONLY while a test is in
-            progress on this Monitoring screen. Does not render on any other
-            ControllerScreen view, so existing UI elsewhere is unaffected. */}
         {testInProgress && <CustomHeader kioskLocked={testInProgress} />}
         <WifiGuard onRestore={handleWifiRestore} />
+
+        {networkWarning && (
+          <View style={sv.networkStatusContainer}>
+            <Text style={sv.unstableConnectionText}>⚠ Unstable Network Connection</Text>
+          </View>
+        )}
+
         <PeerStatusBar connected={peerConnected} rtt={peerRtt}
           reconnecting={peerReconnecting} reconnectFailed={reconnectFailed}
           onRetry={handleManualReconnect} />
@@ -1431,6 +1775,13 @@ function StepDot({ n, active, done, label }) {
   );
 }
 
+const ProfileRow = ({ label, value }) => (
+  <View style={sv.profileRow}>
+    <Text style={sv.profileLabel}>{label}</Text>
+    <Text style={sv.profileValue}>{value || '--'}</Text>
+  </View>
+);
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Styles
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1478,23 +1829,8 @@ const dm = StyleSheet.create({
 
 const auth = StyleSheet.create({
   root: { flex: 1, backgroundColor: appColor },
-
-  logoBox: {
-    width: 150,
-    height: 150,
-    borderRadius: 75,
-    backgroundColor: 'white',
-    alignSelf: 'center',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginVertical: 40,
-  },
-  logo: {
-    width: '65%',
-    height: '65%',
-    resizeMode: 'contain'
-  },
-
+  logoBox: { width: 150, height: 150, borderRadius: 75, backgroundColor: 'white', alignSelf: 'center', alignItems: 'center', justifyContent: 'center', marginVertical: 40 },
+  logo: { width: '65%', height: '65%', resizeMode: 'contain' },
   card: { backgroundColor: 'white', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 28, alignItems: 'center', gap: 12, justifyContent: 'flex-end' },
   title: { fontSize: 26, fontWeight: 'bold', color: appColor },
   subtitle: { fontSize: 15, color: 'grey', marginBottom: 6 },
@@ -1542,7 +1878,7 @@ const styles = StyleSheet.create({
   btnText: { color: '#fff', fontSize: 14, fontWeight: '600', letterSpacing: 0.4 },
   ghostBtn: { paddingVertical: 8 },
   ghostBtnText: { color: '#5b5bd6', fontSize: 13, textDecorationLine: 'underline' },
-  back: { alignSelf: 'flex-start' },
+  back: { alignSelf: 'flex-start', marginBottom: 12 },
   backText: { color: '#7c7cf0', fontSize: 13 },
   sectionHeading: { color: '#c0c0e0', fontSize: 14, fontWeight: '600' },
   loadingRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 16 },
@@ -1585,8 +1921,6 @@ const styles = StyleSheet.create({
   infoVal: { color: '#c0c0e0', fontSize: 13, fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace', fontWeight: '700' },
   completeBox: { backgroundColor: 'rgba(76,175,80,0.1)', borderWidth: 1, borderColor: 'rgba(76,175,80,0.3)', borderRadius: 12, padding: 16, alignItems: 'center', marginBottom: 8 },
   completeText: { color: '#81c784', fontSize: 16, fontWeight: '600' },
-  pdfSection: { flex: 1, backgroundColor: '#000' },
-  pdf: { flex: 1, width: '100%' },
 });
 
 const sv = StyleSheet.create({
@@ -1607,4 +1941,48 @@ const sv = StyleSheet.create({
   regDisconnectRow: { alignItems: 'center', marginTop: 8, paddingTop: 12, borderTopWidth: 1, borderTopColor: 'rgba(229,57,53,0.12)' },
   inputError: { borderColor: 'rgba(239,83,80,0.7)', backgroundColor: 'rgba(239,83,80,0.05)' },
   fieldError: { color: '#ef5350', fontSize: 11, marginTop: 2, marginLeft: 2 },
+
+  // Dashboard / Home Styles
+  homeWrapper: { flex: 1, gap: 24 },
+  profileCard: { backgroundColor: 'rgba(91,91,214,0.06)', borderWidth: 1, borderColor: 'rgba(91,91,214,0.2)', borderRadius: 16, padding: 20 },
+  profileHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.05)', paddingBottom: 12 },
+  profileTitle: { color: '#e8e8f0', fontSize: 16, fontWeight: '600' },
+  logoutBtn: { backgroundColor: 'rgba(229,57,53,0.1)', paddingVertical: 6, paddingHorizontal: 16, borderRadius: 100, borderWidth: 1, borderColor: 'rgba(229,57,53,0.3)' },
+  logoutBtnText: { color: '#ef5350', fontSize: 12, fontWeight: '600' },
+  profileData: { gap: 10 },
+  profileRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  profileLabel: { color: '#889', fontSize: 12, fontWeight: '500' },
+  profileValue: { color: '#c0c0e0', fontSize: 13, fontWeight: '600', fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace' },
+  actionPrompt: { color: '#889', fontSize: 13, textAlign: 'center', marginTop: 8 },
+  actionRow: { flexDirection: 'row', gap: 12 },
+  actionBtn: { flex: 1, backgroundColor: '#5b5bd6', paddingVertical: 14, borderRadius: 12, alignItems: 'center', shadowColor: '#5b5bd6', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 10, elevation: 6 },
+  actionBtnText: { color: '#fff', fontSize: 14, fontWeight: '600' },
+  actionBtnGhost: { backgroundColor: 'rgba(255,255,255,0.03)', borderWidth: 1, borderColor: 'rgba(124,124,240,0.3)', shadowOpacity: 0, elevation: 0 },
+  actionBtnGhostText: { color: '#a0a0f0', fontSize: 14, fontWeight: '600' },
+
+  // Search Step Styles
+  searchBarRow: { flexDirection: 'row', gap: 10, alignItems: 'center' },
+  searchInput: { flex: 1, backgroundColor: '#0d0d1a', borderWidth: 1, borderColor: '#2a2a40', borderRadius: 10, color: '#e8e8f0', fontSize: 14, paddingVertical: 12, paddingHorizontal: 16 },
+  searchBtn: { backgroundColor: '#5b5bd6', paddingVertical: 12, paddingHorizontal: 20, borderRadius: 10, justifyContent: 'center', alignItems: 'center' },
+  searchBtnText: { color: '#fff', fontSize: 14, fontWeight: '600' },
+  searchErrorText: { color: '#ef5350', fontSize: 13, marginTop: 12, textAlign: 'center' },
+  searchResultCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.03)', borderWidth: 1, borderColor: '#1e1e30', borderRadius: 12, padding: 12, marginBottom: 10 },
+  searchResultAvatar: { width: 44, height: 44, borderRadius: 22, backgroundColor: 'rgba(91,91,214,0.15)', alignItems: 'center', justifyContent: 'center' },
+  searchResultAvatarText: { color: '#a0a0f0', fontSize: 18, fontWeight: '700' },
+  searchResultName: { color: '#e8e8f0', fontSize: 15, fontWeight: '600', marginBottom: 2 },
+  searchResultDetails: { color: '#889', fontSize: 11, marginBottom: 2 },
+  centerMsg: { alignItems: 'center', justifyContent: 'center', paddingVertical: 40, gap: 12 },
+  msgText: { color: '#889', fontSize: 14 },
+  networkStatusContainer: {
+    backgroundColor: 'rgba(229,57,53,0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(229,57,53,0.3)',
+    borderRadius: 8,
+    padding: 10,
+    marginHorizontal: 20,
+    marginTop: 10,
+    alignItems: 'center',
+    marginBottom: -10, // offsets the space before the card
+  },
+  unstableConnectionText: { color: '#ef5350', fontSize: 13, fontWeight: '600' },
 });

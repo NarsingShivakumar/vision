@@ -12,10 +12,9 @@ const submitRegistrationApi = async (payload) => {
 };
 // v4.1: reassign assistant mid-session — mirrors Angular reassignToAssistant()
 const reassignAssistantApi = async (roomCode, assistantId) => {
-    const res = await apiService.post(
-        'api/v1/vision/reassign',
-        { params: { roomCode, assistantId } }
-    );
+    const res = await apiService.post('api/v1/vision/reassign', null, {
+        params: { roomCode, assistantId }
+    });
     return res?.data ?? res;
 };
 //  PDF URI Builder
@@ -113,6 +112,17 @@ const checkAssistantDeclineApi = async (username) => {
         return error?.response?.data ?? null;
     }
 };
+const getEmployee = async (params = {}) => {
+    try {
+        const resp = await apiService.get("api/v1/employees", { params });
+        console.log("resp::", resp);
+        return resp.data
+    }
+    catch (error) {
+        console.log("ECG TYPE ERROR : ", error)
+    }
+
+}
 
 export {
     fetchActiveAssistantsApi,
@@ -126,4 +136,5 @@ export {
     getDesignations,
     sendEmployeeDetailsList,
     checkAssistantDeclineApi,
+    getEmployee,
 };

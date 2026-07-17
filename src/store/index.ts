@@ -6,6 +6,7 @@ import controlReducer from './slices/controlSlice';
 import wifiReducer from './slices/wifiSlice';
 import peerReducer from './slices/peerSlice';
 import resultReducer from './slices/resultSlice';
+import { aiRegisteredPatientReducer } from './slices/AiPatientRegisteredSlice';
 
 export const store = configureStore({
     reducer: {
@@ -15,6 +16,7 @@ export const store = configureStore({
         wifi: wifiReducer,
         peer: peerReducer,
         result: resultReducer,
+        aiRegisteredPatient: aiRegisteredPatientReducer,
 
     },
     middleware: g => g({ serializableCheck: { ignoredActions: ['sharing/updateStreamStats'] } }),
